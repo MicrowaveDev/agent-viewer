@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Viewer</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1>Agent Viewer</h1>
+        <div class="header-right">
+          <span class="tasks-dir" id="tasksDir" onclick="copyTasksDir()" title="Click to copy">Detecting...</span>
+          <div class="status-badge">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Connecting</span>
+          </div>
+          <button class="btn" onclick="refresh()">Refresh</button>
+        </div>
+      </header>
+      <div class="main">
+        <aside class="sidebar">
+          <div class="sidebar-header">Task Outputs (<span id="fileCount">0</span>)</div>
+          <div class="file-list" id="fileList"></div>
+        </aside>
+        <section class="content">
+          <div class="content-header" id="contentHeader" style="display: none">
+            <span class="content-title" id="contentTitle"></span>
+            <button class="path-copy-btn" id="copyPathBtn" onclick="copySelectedFilePath()" title="Copy to temp and copy short temp path">Copy path</button>
+            <div class="search-bar" id="searchBar">
+              <input type="text" id="searchInput" placeholder="Search..." autocomplete="off">
+              <span class="search-count" id="searchCount"></span>
+              <button class="search-nav" id="searchPrev" onclick="searchNav(-1)" title="Previous">&#9650;</button>
+              <button class="search-nav" id="searchNext" onclick="searchNav(1)" title="Next">&#9660;</button>
+              <button class="search-nav" id="searchClose" onclick="clearSearch()" title="Clear">&#10005;</button>
+            </div>
+            <button class="search-nav" id="copyFileBtn" onclick="copyFileContent()" title="Copy file to clipboard" style="margin-left: 8px; margin-right: 4px;">&#128203;</button>
+            <span class="content-meta" id="contentMeta"></span>
+          </div>
+          <div class="output-container" id="outputContainer">
+            <div class="empty-state" id="emptyState">
+              <div style="font-size: 32px; opacity: 0.5;">&#9671;</div>
+              <div>No task selected</div>
+              <div style="font-size: 12px">Select a task from the sidebar or wait for new outputs</div>
+            </div>
+            <div id="outputContent"></div>
+          </div>
+        </section>
+      </div>
+      <div class="toast" id="toast"></div>
+    </div>
+
+    <!-- CDN libs -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@16.3.0/lib/marked.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked-highlight@2.2.1/lib/index.umd.js"></script>
+
+    <!-- App -->
+    <script src="renderers.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
