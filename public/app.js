@@ -152,6 +152,43 @@ function parseJSONL(content) {
     .filter(Boolean);
 }
 
+function parseJSONLChunk(content, loadState, isDone) {
+  const combined = `${loadState?.pendingLine || ""}${content || ""}`;
+  if (!combined) return { events: [], plainText: "" };
+
+  const lines = combined.split("\n");
+  let pendingLine = "";
+  if (!combined.endsWith("\n")) {
+    pendingLine = lines.pop() || "";
+  }
+  if (isDone && pendingLine) {
+    lines.push(pendingLine);
+    pendingLine = "";
+  }
+  if (loadState) loadState.pendingLine = pendingLine;
+
+  const events = [];
+  const plainLines = [];
+  for (const line of lines) {
+    if (!line) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      plainLines.push(line);
+    }
+  }
+
+  return { events, plainText: plainLines.join("\n") };
+}
+
+function redactGeneratedImagePayload(p) {
+  if (!p || !String(p.type || "").startsWith("image_generation_")) return;
+  if (typeof p.result === "string" && p.result.length > 0) {
+    p.result_bytes = new Blob([p.result]).size;
+    p.result = "[redacted generated image base64]";
+  }
+}
+
 // --- Codex format detection ---
 
 function isCodexFormat(events) {
@@ -252,8 +289,8 @@ function renderContent() {
   }
 }
 
-function renderChunk(content, file, isFirstChunk) {
-  const events = parseJSONL(content);
+function renderChunk(content, file, isFirstChunk, loadState, isDone) {
+  const { events, plainText } = parseJSONLChunk(content, loadState, isDone);
   if (events.length > 0) {
     const isCodex = file?.source === "codex" || isCodexFormat(events);
     const renderer = isCodex
@@ -267,10 +304,10 @@ function renderChunk(content, file, isFirstChunk) {
     } else {
       els.outputContent.insertAdjacentHTML("beforeend", html);
     }
-  } else if (content.trim()) {
-    const html = isDiff(content)
-      ? `<div class="md-content"><pre><code>${highlightDiff(content)}</code></pre></div>`
-      : `<div class="md-content"><pre><code>${escapeHtml(content)}</code></pre></div>`;
+  } else if (plainText.trim()) {
+    const html = isDiff(plainText)
+      ? `<div class="md-content"><pre><code>${highlightDiff(plainText)}</code></pre></div>`
+      : `<div class="md-content"><pre><code>${escapeHtml(plainText)}</code></pre></div>`;
     if (isFirstChunk) {
       els.outputContent.innerHTML = html;
     } else {
@@ -307,7 +344,7 @@ async function loadFileContent(id) {
   }
 
   state.fileContents[id] = "";
-  state.fileLoadState[id] = { offset: 0, done: false };
+  state.fileLoadState[id] = { offset: 0, done: false, pendingLine: "" };
   resetBlockCounter();
   resetCodexState();
 
@@ -354,7 +391,7 @@ async function loadFileContent(id) {
     }
 
     try {
-      renderChunk(data.content || "", file, loadState.offset === data.nextOffset && data.offset === 0);
+      renderChunk(data.content || "", file, data.offset === 0, loadState, data.done);
     } catch (err) {
       console.error(err);
       if (state.selectedFile === id && state.loadToken === token) {
@@ -473,6 +510,7 @@ function cleanForCopy(content) {
         if (p.type === "token_count") return null;
         if (p.type === "agent_message") return null;
         if (p.type === "agent_reasoning") return null;
+        redactGeneratedImagePayload(p);
 
         // session_meta: keep only useful fields
         if (evt.type === "session_meta") {

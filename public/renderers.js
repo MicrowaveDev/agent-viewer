@@ -79,6 +79,13 @@ function truncate(str, max) {
   return str.slice(0, max) + "...";
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1048576) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1048576).toFixed(1)} MB`;
+}
+
 function stringifyToolContent(value) {
   if (typeof value === "string") return value;
   if (!value) return "";
@@ -509,7 +516,35 @@ function renderCodexResponseItem(p, time) {
     </div>`;
   }
 
+  if (String(subtype || "").startsWith("image_generation_")) {
+    return renderCodexImageGeneration(p, time);
+  }
+
   return "";
+}
+
+function renderCodexImageGeneration(p, time) {
+  const prompt = p.revised_prompt || p.prompt || "";
+  const title = p.saved_path || p.id || p.status || "generated image";
+  const resultBytes = p.result_bytes || (typeof p.result === "string" ? p.result.length : 0);
+  const fields = [
+    ["Status", p.status],
+    ["Image", p.saved_path],
+    ["Result", resultBytes ? `base64 redacted (${formatBytes(resultBytes)})` : null],
+  ]
+    .filter(([, v]) => v)
+    .map(
+      ([k, v]) =>
+        `<div><span class="session-field">${k}:</span> <span class="session-value">${escapeHtml(String(v))}</span></div>`,
+    )
+    .join("");
+  const promptBlock = prompt
+    ? `<div class="progress-info">${escapeHtml(prompt)}</div>`
+    : "";
+  return `<div class="event event-tool">
+    <div class="event-header"><span class="badge badge-tool">Image</span><span class="event-time">${time}</span></div>
+    <div class="event-body">${renderToolBlock("Image generation", title, `${fields}${promptBlock}`)}</div>
+  </div>`;
 }
 
 function renderImageRefs(refs, file) {
@@ -561,6 +596,10 @@ function renderCodexEventMsg(p, time, file) {
   // Context compacted
   if (subtype === "context_compacted") {
     return `<div class="turn-divider">Context compacted</div>`;
+  }
+
+  if (String(subtype || "").startsWith("image_generation_")) {
+    return renderCodexImageGeneration(p, time);
   }
 
   // Skip: agent_message, agent_reasoning, token_count (duplicates/noise)
