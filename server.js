@@ -6,7 +6,7 @@ import os from "os";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3032;
+const PORT = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : 0;
 const metadataCacheDir = path.join(__dirname, ".cache");
 const metadataCachePath = path.join(metadataCacheDir, "files-metadata.json");
 const tempDir = path.join(__dirname, "temp");
@@ -1132,8 +1132,10 @@ app.get("/:id", (req, res) => {
 
 // --- Start ---
 
-app.listen(PORT, () => {
-  console.log(`Agent Viewer running at http://localhost:${PORT}`);
+const server = app.listen(PORT, () => {
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : PORT;
+  console.log(`Agent Viewer running at http://localhost:${port}`);
   startWatcher();
   startClaudeProjectsWatcher();
   startCodexWatcher();
