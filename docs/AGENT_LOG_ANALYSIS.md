@@ -24,8 +24,9 @@ Prioritize issues that repeatedly cost:
 ## First Command
 
 For read-only rollout analysis, do not run a sync that moves submodule checkouts.
-Read this guide and use the reusable JSONL summarizer instead of ad hoc `node -e`
-probes:
+Read this guide and use the reusable streaming JSONL summarizer instead of ad
+hoc `node -e` probes. It redacts generated-image/base64 payloads while keeping
+line numbers, saved paths, prompts, and byte counts:
 
 ```bash
 yarn agent:analyze-log <rollout.jsonl> --all
@@ -327,6 +328,7 @@ For each finding include:
 ## Log-Specific Tips
 
 - For Codex rollout logs, ignore noise first: `token_count`, encrypted reasoning payloads, bulky session metadata, and repeated system/developer blocks unless they are directly relevant to the failure.
+- Treat `image_generation_*` `result` fields as binary payloads, not analysis text. Use the analyzer's redacted image-generation summary instead of reading or pasting raw base64.
 - Use the cleaned export from the agent viewer when it preserves the evidence you need.
 - If you need raw logs, inspect narrowly and summarize; do not paste large raw sections into the report.
 - Track both command count and “time-to-first-correct-action”. Many optimization opportunities show up there before they show up in total command count.

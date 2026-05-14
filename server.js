@@ -6,7 +6,7 @@ import os from "os";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3032;
+const PORT = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : 0;
 const metadataCacheDir = path.join(__dirname, ".cache");
 const metadataCachePath = path.join(metadataCacheDir, "files-metadata.json");
 const tempDir = path.join(__dirname, "temp");
@@ -121,6 +121,14 @@ function copyFileToTemp(fileId, filePath) {
   };
 }
 
+function redactGeneratedImagePayload(p) {
+  if (!p || !String(p.type || "").startsWith("image_generation_")) return;
+  if (typeof p.result === "string" && p.result.length > 0) {
+    p.result_bytes = Buffer.byteLength(p.result, "utf8");
+    p.result = "[redacted generated image base64]";
+  }
+}
+
 function cleanForCopy(content) {
   if (!content) return "";
   return content
@@ -135,6 +143,7 @@ function cleanForCopy(content) {
         if (p.type === "token_count") return null;
         if (p.type === "agent_message") return null;
         if (p.type === "agent_reasoning") return null;
+        redactGeneratedImagePayload(p);
 
         if (evt.type === "session_meta") {
           evt.payload = {
@@ -645,20 +654,41 @@ function readContentChunk(filePath, offset, limit) {
   }
 
   const readStart = Math.max(0, offset);
-  const baseEnd = Math.min(stats.size, readStart + limit);
-  const extraEnd = Math.min(stats.size, baseEnd + 64 * 1024);
   const fd = fs.openSync(filePath, "r");
   try {
-    const buffer = Buffer.alloc(extraEnd - readStart);
-    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, readStart);
-    let end = bytesRead;
+    const chunks = [];
+    let position = readStart;
+    let totalBytes = 0;
+    let foundNewline = false;
 
-    if (readStart + bytesRead < stats.size) {
-      const newlineIndex = buffer.indexOf(10, Math.max(0, baseEnd - readStart));
-      end = newlineIndex === -1 ? Math.min(bytesRead, baseEnd - readStart) : newlineIndex + 1;
+    while (position < stats.size && !foundNewline) {
+      const targetBytes = totalBytes < limit
+        ? limit - totalBytes
+        : 64 * 1024;
+      const buffer = Buffer.alloc(Math.min(targetBytes, stats.size - position));
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+      if (bytesRead <= 0) break;
+
+      const chunk = buffer.subarray(0, bytesRead);
+      const newlineSearchStart = Math.max(0, limit - totalBytes);
+      const newlineIndex = totalBytes + bytesRead >= limit
+        ? chunk.indexOf(10, newlineSearchStart)
+        : -1;
+
+      if (newlineIndex === -1) {
+        chunks.push(chunk);
+        position += bytesRead;
+        totalBytes += bytesRead;
+      } else {
+        const end = newlineIndex + 1;
+        chunks.push(chunk.subarray(0, end));
+        position += end;
+        totalBytes += end;
+        foundNewline = true;
+      }
     }
 
-    const content = buffer.toString("utf8", 0, end);
+    const content = Buffer.concat(chunks, totalBytes).toString("utf8");
     const nextOffset = readStart + Buffer.byteLength(content, "utf8");
     return {
       content,
@@ -775,7 +805,7 @@ app.get("/api/files/:id", (req, res) => {
   saveMetadataCache();
   res.json({
     ...metadata,
-    content,
+    content: cleanForCopy(content),
   });
 });
 
@@ -804,12 +834,13 @@ app.get("/api/files/:id/chunk", (req, res) => {
     source,
   });
   const chunk = readContentChunk(filePath, offset, limit);
+  const content = cleanForCopy(chunk.content);
   fileOffsets.set(filePath, chunk.nextOffset);
   saveMetadataCache();
 
   res.json({
     ...metadata,
-    content: chunk.content,
+    content: content ? `${content}\n` : "",
     offset,
     nextOffset: chunk.nextOffset,
     done: chunk.done,
@@ -1132,8 +1163,10 @@ app.get("/:id", (req, res) => {
 
 // --- Start ---
 
-app.listen(PORT, () => {
-  console.log(`Agent Viewer running at http://localhost:${PORT}`);
+const server = app.listen(PORT, () => {
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : PORT;
+  console.log(`Agent Viewer running at http://localhost:${port}`);
   startWatcher();
   startClaudeProjectsWatcher();
   startCodexWatcher();
