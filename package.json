@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "agent:analyze-log": "node scripts/analyze-log.mjs",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
