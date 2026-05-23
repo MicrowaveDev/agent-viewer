@@ -15,10 +15,14 @@ const state = {
   userScrolledUp: false,
   eventSource: null,
   loadToken: 0,
+  scrollLazyLoadArmed: false,
   searchQuery: "",
   searchMatches: [],
   searchIndex: -1,
 };
+
+const INITIAL_CHUNK_SIZE = 64 * 1024;
+const SCROLL_LOAD_THRESHOLD = 600;
 
 // --- DOM refs ---
 
@@ -152,6 +156,35 @@ function parseJSONL(content) {
     .filter(Boolean);
 }
 
+function parseJSONLChunk(content, loadState, isDone) {
+  const combined = `${loadState?.pendingLine || ""}${content || ""}`;
+  if (!combined) return { events: [], plainText: "" };
+
+  const lines = combined.split("\n");
+  let pendingLine = "";
+  if (!combined.endsWith("\n")) {
+    pendingLine = lines.pop() || "";
+  }
+  if (isDone && pendingLine) {
+    lines.push(pendingLine);
+    pendingLine = "";
+  }
+  if (loadState) loadState.pendingLine = pendingLine;
+
+  const events = [];
+  const plainLines = [];
+  for (const line of lines) {
+    if (!line) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      plainLines.push(line);
+    }
+  }
+
+  return { events, plainText: plainLines.join("\n") };
+}
+
 // --- Codex format detection ---
 
 function isCodexFormat(events) {
@@ -211,10 +244,14 @@ function renderContent() {
   const file = state.files.find((f) => f.id === state.selectedFile);
   if (file) {
     const filePath = getFilePath(file);
+    const loadState = state.fileLoadState[state.selectedFile];
+    const loadedLabel = loadState?.offset
+      ? ` | ${loadState.done ? "fully loaded" : `${formatSize(loadState.offset)} loaded`}`
+      : "";
     els.contentTitle.textContent = formatShortPath(filePath);
     els.contentTitle.title = filePath;
     els.copyPathBtn.dataset.path = filePath;
-    els.contentMeta.textContent = `${formatSize(file.size)} | ${formatTime(file.modified)}`;
+    els.contentMeta.textContent = `${formatSize(file.size)} | ${formatTime(file.modified)}${loadedLabel}`;
   }
 
   if (state.loadingFileId === state.selectedFile) {
@@ -245,32 +282,59 @@ function renderContent() {
     els.outputContent.innerHTML = "";
   }
 
-  if (!state.userScrolledUp) {
+  updateLoadMoreControl(state.selectedFile);
+
+  const selectedLoadState = state.fileLoadState[state.selectedFile];
+  if (!selectedLoadState && !state.userScrolledUp) {
     requestAnimationFrame(() => {
       els.outputContainer.scrollTop = els.outputContainer.scrollHeight;
     });
   }
 }
 
-function renderChunk(content, file, isFirstChunk) {
-  const events = parseJSONL(content);
+function removeLoadMoreControl() {
+  document.getElementById("logLoadMore")?.remove();
+}
+
+function updateLoadMoreControl(id) {
+  removeLoadMoreControl();
+  if (!id || id !== state.selectedFile) return;
+  const loadState = state.fileLoadState[id];
+  if (!loadState || loadState.done) return;
+
+  const control = document.createElement("div");
+  control.id = "logLoadMore";
+  control.className = "load-more";
+  if (loadState.loading) {
+    control.innerHTML = '<span class="load-more-status">Loading...</span>';
+  } else {
+    control.innerHTML = '<button class="btn load-more-btn" onclick="loadMoreSelected()">Load more</button>';
+  }
+  els.outputContent.appendChild(control);
+}
+
+function renderChunk(content, file, isFirstChunk, loadState, isDone) {
+  removeLoadMoreControl();
+  const { events, plainText } = parseJSONLChunk(content, loadState, isDone);
   if (events.length > 0) {
     const isCodex = file?.source === "codex" || isCodexFormat(events);
+    if (isFirstChunk) {
+      resetBlockCounter();
+      resetCodexState();
+    }
     const renderer = isCodex
       ? (event) => renderCodexEvent(event, file)
       : renderEvent;
     const html = events.map(renderer).join("");
     if (isFirstChunk) {
-      resetBlockCounter();
-      resetCodexState();
       els.outputContent.innerHTML = html;
     } else {
       els.outputContent.insertAdjacentHTML("beforeend", html);
     }
-  } else if (content.trim()) {
-    const html = isDiff(content)
-      ? `<div class="md-content"><pre><code>${highlightDiff(content)}</code></pre></div>`
-      : `<div class="md-content"><pre><code>${escapeHtml(content)}</code></pre></div>`;
+  } else if (plainText.trim()) {
+    const html = isDiff(plainText)
+      ? `<div class="md-content"><pre><code>${highlightDiff(plainText)}</code></pre></div>`
+      : `<div class="md-content"><pre><code>${escapeHtml(plainText)}</code></pre></div>`;
     if (isFirstChunk) {
       els.outputContent.innerHTML = html;
     } else {
@@ -280,11 +344,7 @@ function renderChunk(content, file, isFirstChunk) {
     els.outputContent.innerHTML = "";
   }
 
-  if (!state.userScrolledUp) {
-    requestAnimationFrame(() => {
-      els.outputContainer.scrollTop = els.outputContainer.scrollHeight;
-    });
-  }
+  updateLoadMoreControl(state.selectedFile);
 }
 
 async function loadFileContent(id) {
@@ -292,6 +352,10 @@ async function loadFileContent(id) {
   const token = ++state.loadToken;
   const loadedState = state.fileLoadState[id];
   if (loadedState?.done && state.fileContents[id]) {
+    renderContent();
+    return;
+  }
+  if (loadedState && state.fileContents[id]) {
     renderContent();
     return;
   }
@@ -307,67 +371,89 @@ async function loadFileContent(id) {
   }
 
   state.fileContents[id] = "";
-  state.fileLoadState[id] = { offset: 0, done: false };
+  state.fileLoadState[id] = { offset: 0, done: false, pendingLine: "", loading: false };
   resetBlockCounter();
   resetCodexState();
 
-  while (state.selectedFile === id && state.loadToken === token) {
-    let data;
-    const loadState = state.fileLoadState[id];
-    const file = state.files.find((f) => f.id === id);
-    const loading = file?.contentLoading || {};
-    const chunkSize = loading.chunkSize ? `&limit=${encodeURIComponent(loading.chunkSize)}` : "";
-    const endpoint =
-      loading.mode === "chunked" && loading.endpoint
-        ? loading.endpoint
-        : `/api/files/${encodeURIComponent(id)}/chunk`;
-    const separator = endpoint.includes("?") ? "&" : "?";
-    try {
-      const res = await fetch(
-        `${endpoint}${separator}offset=${loadState.offset}${chunkSize}`,
-      );
-      if (!res.ok) throw new Error(`Failed to load ${id}`);
-      data = await res.json();
-    } catch (err) {
-      console.error(err);
-      if (state.selectedFile === id && state.loadToken === token) {
-        els.outputContent.innerHTML = `<div class="empty-state" style="height: 120px">Unable to load log content</div>`;
-      }
-      return;
+  await loadNextFileChunk(id, token, INITIAL_CHUNK_SIZE);
+}
+
+async function loadNextFileChunk(id, token = state.loadToken, limit = null) {
+  const loadState = state.fileLoadState[id];
+  if (!loadState || loadState.done || loadState.loading) return;
+  if (state.selectedFile !== id || state.loadToken !== token) return;
+
+  const file = state.files.find((f) => f.id === id);
+  const loading = file?.contentLoading || {};
+  const requestedLimit = limit || loading.chunkSize || INITIAL_CHUNK_SIZE;
+  const chunkSize = `&limit=${encodeURIComponent(requestedLimit)}`;
+  const endpoint =
+    loading.mode === "chunked" && loading.endpoint
+      ? loading.endpoint
+      : `/api/files/${encodeURIComponent(id)}/chunk`;
+  const separator = endpoint.includes("?") ? "&" : "?";
+
+  loadState.loading = true;
+  updateLoadMoreControl(id);
+
+  let data;
+  try {
+    const res = await fetch(
+      `${endpoint}${separator}offset=${loadState.offset}${chunkSize}`,
+    );
+    if (!res.ok) throw new Error(`Failed to load ${id}`);
+    data = await res.json();
+  } catch (err) {
+    console.error(err);
+    loadState.loading = false;
+    if (state.selectedFile === id && state.loadToken === token) {
+      els.outputContent.innerHTML = `<div class="empty-state" style="height: 120px">Unable to load log content</div>`;
     }
-
-    if (state.selectedFile !== id || state.loadToken !== token) return;
-
-    state.fileContents[id] += data.content || "";
-    loadState.offset = data.nextOffset;
-    loadState.done = data.done;
-
-    if (file) {
-      const previousPromptPreview = file.promptPreview;
-      file.size = data.size;
-      file.modified = data.modified;
-      file.promptPreview = data.promptPreview || data.title || file.promptPreview;
-      file.imagePreviews = data.imagePreviews || file.imagePreviews;
-      file.contentLoading = data.contentLoading || file.contentLoading;
-      file.source = data.source || file.source;
-      if (file.promptPreview !== previousPromptPreview) renderFileList();
-    }
-
-    try {
-      renderChunk(data.content || "", file, loadState.offset === data.nextOffset && data.offset === 0);
-    } catch (err) {
-      console.error(err);
-      if (state.selectedFile === id && state.loadToken === token) {
-        els.outputContent.innerHTML = `<div class="empty-state" style="height: 120px">Unable to render log content</div>`;
-      }
-      return;
-    }
-
-    if (data.done) return;
-    if (state.selectedFile === id) {
-      els.contentMeta.textContent = `${formatSize(data.size)} | ${formatTime(data.modified)} | ${formatSize(data.nextOffset)} loaded`;
-    }
+    return;
   }
+
+  if (state.selectedFile !== id || state.loadToken !== token) {
+    loadState.loading = false;
+    return;
+  }
+
+  state.fileContents[id] += data.content || "";
+  loadState.offset = data.nextOffset;
+  loadState.done = data.done;
+  loadState.loading = false;
+
+  if (file) {
+    const previousPromptPreview = file.promptPreview;
+    file.size = data.size;
+    file.modified = data.modified;
+    file.promptPreview = data.promptPreview || data.title || file.promptPreview;
+    file.imagePreviews = data.imagePreviews || file.imagePreviews;
+    file.contentLoading = data.contentLoading || file.contentLoading;
+    file.source = data.source || file.source;
+    if (file.promptPreview !== previousPromptPreview) renderFileList();
+  }
+
+  try {
+    renderChunk(data.content || "", file, data.offset === 0, loadState, data.done);
+  } catch (err) {
+    console.error(err);
+    if (state.selectedFile === id && state.loadToken === token) {
+      els.outputContent.innerHTML = `<div class="empty-state" style="height: 120px">Unable to render log content</div>`;
+    }
+    return;
+  }
+
+  if (state.selectedFile === id) {
+    const loadedLabel = data.done
+      ? "fully loaded"
+      : `${formatSize(data.nextOffset)} loaded`;
+    els.contentMeta.textContent = `${formatSize(data.size)} | ${formatTime(data.modified)} | ${loadedLabel}`;
+  }
+}
+
+function loadMoreSelected() {
+  if (!state.selectedFile) return;
+  loadNextFileChunk(state.selectedFile);
 }
 
 async function loadFullFileContent(id, token) {
@@ -414,6 +500,7 @@ async function loadFullFileContent(id, token) {
 
 function selectFile(id) {
   state.selectedFile = id;
+  state.scrollLazyLoadArmed = false;
   const file = state.files.find((f) => f.id === id);
   if (file) file.hasUpdate = false;
   history.replaceState(null, "", "/" + id);
@@ -589,9 +676,30 @@ async function refresh() {
 
 // --- Auto-scroll tracking ---
 
+function armScrollLazyLoad() {
+  state.scrollLazyLoadArmed = true;
+}
+
+els.outputContainer.addEventListener("wheel", armScrollLazyLoad, { passive: true });
+els.outputContainer.addEventListener("touchmove", armScrollLazyLoad, { passive: true });
+els.outputContainer.addEventListener("pointerdown", armScrollLazyLoad);
+els.outputContainer.addEventListener("keydown", (e) => {
+  if (["ArrowDown", "End", "PageDown", " "].includes(e.key)) {
+    armScrollLazyLoad();
+  }
+});
+
 els.outputContainer.addEventListener("scroll", () => {
   const el = els.outputContainer;
-  state.userScrolledUp = el.scrollHeight - el.scrollTop - el.clientHeight > 50;
+  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+  state.userScrolledUp = distanceFromBottom > 50;
+  if (
+    state.selectedFile &&
+    state.scrollLazyLoadArmed &&
+    distanceFromBottom < SCROLL_LOAD_THRESHOLD
+  ) {
+    loadNextFileChunk(state.selectedFile);
+  }
 });
 
 // --- SSE Connection ---

@@ -563,6 +563,7 @@ function getAllFiles() {
   for (const f of all) {
     filePathMap.set(f.id, f.filePath);
     fileMetaMap.set(f.id, f);
+    if (!fileOffsets.has(f.filePath)) fileOffsets.set(f.filePath, f.size);
   }
   saveMetadataCache();
   return all;
@@ -804,7 +805,6 @@ app.get("/api/files/:id/chunk", (req, res) => {
     source,
   });
   const chunk = readContentChunk(filePath, offset, limit);
-  fileOffsets.set(filePath, chunk.nextOffset);
   saveMetadataCache();
 
   res.json({
@@ -928,6 +928,7 @@ function startWatcher() {
     const id = path.basename(filePath, ".output");
     filePathMap.set(id, filePath);
     const stats = fs.statSync(filePath);
+    fileOffsets.set(filePath, stats.size);
     const metadata = buildFileMetadata({
       id,
       filename: path.basename(filePath),
@@ -993,6 +994,7 @@ function startClaudeProjectsWatcher() {
     const projectName = path.basename(path.dirname(filePath));
     const id = claudeProjectFileId(projectName, path.basename(filePath));
     const stats = fs.statSync(filePath);
+    fileOffsets.set(filePath, stats.size);
     const meta = buildFileMetadata({
       id,
       filename: path.basename(filePath),
@@ -1068,6 +1070,7 @@ function startCodexWatcher() {
     const id = codexFileId(filePath);
     filePathMap.set(id, filePath);
     const stats = fs.statSync(filePath);
+    fileOffsets.set(filePath, stats.size);
     const metadata = buildFileMetadata({
       id,
       filename: path.basename(filePath),
