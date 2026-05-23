@@ -6,7 +6,10 @@ import os from "os";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3032;
+const DEFAULT_PORT = 55032;
+const PORT = process.env.PORT
+  ? Number.parseInt(process.env.PORT, 10)
+  : DEFAULT_PORT;
 const metadataCacheDir = path.join(__dirname, ".cache");
 const metadataCachePath = path.join(metadataCacheDir, "files-metadata.json");
 const tempDir = path.join(__dirname, "temp");
