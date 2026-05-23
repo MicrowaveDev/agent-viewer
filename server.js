@@ -108,14 +108,19 @@ function compactFilePath(filePath) {
   return `${visiblePrefix}...${compactFileName(path.basename(filePath))}`;
 }
 
-function copyFileToTemp(fileId, filePath) {
+function linkFileToTemp(fileId, filePath) {
   fs.mkdirSync(tempDir, { recursive: true });
   const tempFileName = safeTempFileName(fileId, filePath);
   const tempPath = path.join(tempDir, tempFileName);
-  const content = fs.readFileSync(filePath, "utf8");
-  fs.writeFileSync(tempPath, cleanForCopy(content), "utf8");
+  try {
+    fs.unlinkSync(tempPath);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  fs.symlinkSync(filePath, tempPath);
   return {
     tempPath,
+    sourcePath: filePath,
     repoPath: path.relative(__dirname, tempPath),
     compactPath: compactFilePath(tempPath),
   };
@@ -827,17 +832,17 @@ app.get("/api/files/:id/image/:index", (req, res) => {
   return sendImageRef(res, ref);
 });
 
-// REST: copy selected source log into the viewer temp folder
+// REST: expose a short temp path to the selected source log
 app.post("/api/files/:id/temp-copy", (req, res) => {
   const filePath = resolveFilePath(req.params.id);
   if (!filePath)
     return res.status(404).json({ error: "File not found" });
 
   try {
-    const copied = copyFileToTemp(req.params.id, filePath);
+    const copied = linkFileToTemp(req.params.id, filePath);
     res.json(copied);
   } catch (err) {
-    res.status(500).json({ error: err.message || "Unable to copy file" });
+    res.status(500).json({ error: err.message || "Unable to expose file path" });
   }
 });
 

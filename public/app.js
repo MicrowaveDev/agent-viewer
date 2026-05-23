@@ -623,13 +623,13 @@ async function copySelectedFilePath() {
     );
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Unable to copy file");
-    const clipboardPath = data.tempPath || data.repoPath;
-    if (!clipboardPath) throw new Error("Temp path missing");
+    const clipboardPath = data.tempPath || data.sourcePath || data.repoPath;
+    if (!clipboardPath) throw new Error("Log path missing");
     await navigator.clipboard.writeText(clipboardPath);
-    showToast("Copied temp path", "success");
+    showToast("Copied log path", "success");
   } catch (err) {
     console.error(err);
-    showToast("Temp copy failed", "error");
+    showToast("Copy path failed", "error");
   } finally {
     els.copyPathBtn.disabled = false;
   }
