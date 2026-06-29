@@ -12,6 +12,7 @@ const metadataCachePath = path.join(metadataCacheDir, "files-metadata.json");
 const tempDir = path.join(__dirname, "temp");
 const DEFAULT_CHUNK_SIZE = 512 * 1024;
 const MAX_CHUNK_SIZE = 2 * 1024 * 1024;
+const MAX_LIVE_UPDATE_BYTES = MAX_CHUNK_SIZE;
 
 // --- Auto-detect Claude Code temp directory ---
 
@@ -572,6 +573,7 @@ function getAllFiles() {
   for (const f of all) {
     filePathMap.set(f.id, f.filePath);
     fileMetaMap.set(f.id, f);
+    setFileOffsetIfUnknown(f.filePath, f.size);
   }
   saveMetadataCache();
   return all;
@@ -595,7 +597,8 @@ function toClientFile(file) {
 }
 
 function readNewContent(filePath) {
-  const lastOffset = fileOffsets.get(filePath) || 0;
+  const hasOffset = fileOffsets.has(filePath);
+  const lastOffset = hasOffset ? fileOffsets.get(filePath) : 0;
   let stats;
 
   try {
@@ -605,21 +608,55 @@ function readNewContent(filePath) {
     return null;
   }
 
+  if (!hasOffset) {
+    fileOffsets.set(filePath, stats.size);
+    return {
+      content: "",
+      skipped: stats.size > 0,
+    };
+  }
+
   // File was truncated — reset offset
   if (stats.size < lastOffset) {
+    if (stats.size > MAX_LIVE_UPDATE_BYTES) {
+      fileOffsets.set(filePath, stats.size);
+      return {
+        content: "",
+        reset: true,
+        skipped: true,
+      };
+    }
+
     fileOffsets.set(filePath, 0);
-    return readFullContent(filePath);
+    return {
+      content: readFullContent(filePath),
+      reset: true,
+    };
   }
 
   if (stats.size === lastOffset) return null;
 
-  const buffer = Buffer.alloc(stats.size - lastOffset);
+  const bytesToRead = stats.size - lastOffset;
+  if (bytesToRead > MAX_LIVE_UPDATE_BYTES) {
+    fileOffsets.set(filePath, stats.size);
+    return {
+      content: "",
+      skipped: true,
+    };
+  }
+
+  const buffer = Buffer.alloc(bytesToRead);
   const fd = fs.openSync(filePath, "r");
-  fs.readSync(fd, buffer, 0, buffer.length, lastOffset);
-  fs.closeSync(fd);
+  try {
+    fs.readSync(fd, buffer, 0, buffer.length, lastOffset);
+  } finally {
+    fs.closeSync(fd);
+  }
 
   fileOffsets.set(filePath, stats.size);
-  return buffer.toString("utf8");
+  return {
+    content: buffer.toString("utf8"),
+  };
 }
 
 function readFullContent(filePath) {
@@ -630,6 +667,18 @@ function readFullContent(filePath) {
   } catch {
     return "";
   }
+}
+
+function setFileOffsetIfUnknown(filePath, size) {
+  if (!fileOffsets.has(filePath)) fileOffsets.set(filePath, size);
+}
+
+function buildLiveUpdatePayload(metadata, update) {
+  const payload = { ...metadata };
+  if (update.reset) payload.contentReset = true;
+  if (update.skipped) payload.contentSkipped = true;
+  if (typeof update.content === "string") payload.content = update.content;
+  return payload;
 }
 
 function resolveFilePath(id) {
@@ -959,6 +1008,7 @@ function startWatcher() {
     const id = path.basename(filePath, ".output");
     filePathMap.set(id, filePath);
     const stats = fs.statSync(filePath);
+    setFileOffsetIfUnknown(filePath, stats.size);
     const metadata = buildFileMetadata({
       id,
       filename: path.basename(filePath),
@@ -975,8 +1025,8 @@ function startWatcher() {
   watcher.on("change", (filePath) => {
     if (!filePath.endsWith(".output")) return;
     const id = path.basename(filePath, ".output");
-    const newContent = readNewContent(filePath);
-    if (newContent) {
+    const update = readNewContent(filePath);
+    if (update) {
       const stats = fs.statSync(filePath);
       const metadata = buildFileMetadata({
         id,
@@ -988,10 +1038,7 @@ function startWatcher() {
       });
       fileMetaMap.set(id, metadata);
       saveMetadataCache();
-      broadcastSSE("file-update", {
-        ...metadata,
-        content: newContent,
-      });
+      broadcastSSE("file-update", buildLiveUpdatePayload(metadata, update));
     }
   });
 
@@ -1024,6 +1071,7 @@ function startClaudeProjectsWatcher() {
     const projectName = path.basename(path.dirname(filePath));
     const id = claudeProjectFileId(projectName, path.basename(filePath));
     const stats = fs.statSync(filePath);
+    setFileOffsetIfUnknown(filePath, stats.size);
     const meta = buildFileMetadata({
       id,
       filename: path.basename(filePath),
@@ -1043,8 +1091,8 @@ function startClaudeProjectsWatcher() {
     if (!filePath.endsWith(".jsonl")) return;
     const projectName = path.basename(path.dirname(filePath));
     const id = claudeProjectFileId(projectName, path.basename(filePath));
-    const newContent = readNewContent(filePath);
-    if (newContent) {
+    const update = readNewContent(filePath);
+    if (update) {
       const stats = fs.statSync(filePath);
       const meta = buildFileMetadata({
         id,
@@ -1058,10 +1106,7 @@ function startClaudeProjectsWatcher() {
       fileMetaMap.set(id, meta);
       filePathMap.set(id, filePath);
       saveMetadataCache();
-      broadcastSSE("file-update", {
-        ...meta,
-        content: newContent,
-      });
+      broadcastSSE("file-update", buildLiveUpdatePayload(meta, update));
     }
   });
 
@@ -1099,6 +1144,7 @@ function startCodexWatcher() {
     const id = codexFileId(filePath);
     filePathMap.set(id, filePath);
     const stats = fs.statSync(filePath);
+    setFileOffsetIfUnknown(filePath, stats.size);
     const metadata = buildFileMetadata({
       id,
       filename: path.basename(filePath),
@@ -1119,8 +1165,8 @@ function startCodexWatcher() {
     )
       return;
     const id = codexFileId(filePath);
-    const newContent = readNewContent(filePath);
-    if (newContent) {
+    const update = readNewContent(filePath);
+    if (update) {
       const stats = fs.statSync(filePath);
       const metadata = buildFileMetadata({
         id,
@@ -1132,10 +1178,7 @@ function startCodexWatcher() {
       });
       fileMetaMap.set(id, metadata);
       saveMetadataCache();
-      broadcastSSE("file-update", {
-        ...metadata,
-        content: newContent,
-      });
+      broadcastSSE("file-update", buildLiveUpdatePayload(metadata, update));
     }
   });
 
@@ -1167,6 +1210,7 @@ const server = app.listen(PORT, () => {
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : PORT;
   console.log(`Agent Viewer running at http://localhost:${port}`);
+  getAllFiles();
   startWatcher();
   startClaudeProjectsWatcher();
   startCodexWatcher();

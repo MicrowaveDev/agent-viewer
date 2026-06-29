@@ -695,8 +695,21 @@ function connectSSE() {
 
   state.eventSource.addEventListener("file-update", (e) => {
     const data = JSON.parse(e.data);
-    state.fileContents[data.id] =
-      (state.fileContents[data.id] || "") + data.content;
+    const hasContent = typeof data.content === "string";
+    if (data.contentReset) {
+      state.fileContents[data.id] = hasContent ? data.content : "";
+      state.fileLoadState[data.id] = {
+        offset: data.size || 0,
+        done: !data.contentSkipped,
+        pendingLine: "",
+      };
+    } else if (hasContent) {
+      state.fileContents[data.id] =
+        (state.fileContents[data.id] || "") + data.content;
+    }
+    if (data.contentSkipped && state.fileLoadState[data.id]) {
+      state.fileLoadState[data.id].done = false;
+    }
     const file = state.files.find((f) => f.id === data.id);
     if (file) {
       file.filename = data.filename || file.filename;
@@ -730,7 +743,15 @@ function connectSSE() {
       sortFiles();
     }
     renderFileList();
-    if (state.selectedFile === data.id) renderContent();
+    if (state.selectedFile === data.id) {
+      if (data.contentSkipped) {
+        delete state.fileContents[data.id];
+        delete state.fileLoadState[data.id];
+        loadFileContent(data.id);
+      } else if (hasContent || data.contentReset) {
+        renderContent();
+      }
+    }
   });
 
   state.eventSource.addEventListener("file-removed", (e) => {
