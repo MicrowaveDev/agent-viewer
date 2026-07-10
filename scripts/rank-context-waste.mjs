@@ -4,6 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import readline from "readline";
+import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 
 const LARGE_OUTPUT_BYTES = 20_000;
@@ -490,8 +491,14 @@ export async function run(options) {
   const rankings = buildRankings(sessions, trees);
   const output = path.resolve(options.output);
   fs.rmSync(path.join(output, "packets"), { recursive: true, force: true });
+  let sourceCommit = null;
+  try {
+    sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: path.dirname(fileURLToPath(import.meta.url)), encoding: "utf8" }).trim();
+  } catch {
+    // The scanner also works from source archives without Git metadata.
+  }
   const manifest = {
-    schemaVersion: 2, detectorVersion: "v1-calibrated", since: since.toISOString(), until: until.toISOString(), roots,
+    schemaVersion: 2, detectorVersion: "v1-calibrated", sourceCommit, since: since.toISOString(), until: until.toISOString(), roots,
     includedCount: sessions.length, excludedCount: excluded.length,
     thresholds: { largeOutputBytes: LARGE_OUTPUT_BYTES, forkHistoryBurstMs: FORK_HISTORY_BURST_MS, packetEventLimit: options.packetEventLimit, packetByteLimit: PACKET_BYTE_LIMIT },
   };
