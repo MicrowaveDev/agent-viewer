@@ -47,7 +47,7 @@ test("continues after malformed JSON and detects repeated commands", async () =>
   await withLog([meta("root"), "{bad", call(1), call(2), call(3)], async (file) => {
     const result = await analyzeLog(file);
     assert.equal(result.badJson, 1);
-    assert.ok(result.signals.some((signal) => signal.ruleId === "repeated-command" && signal.quantity === 3));
+    assert.ok(result.signals.some((signal) => signal.ruleId === "repeated-command-within-task" && signal.quantity === 3));
   });
 });
 

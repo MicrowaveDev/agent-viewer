@@ -75,9 +75,7 @@ function extractCommand(payload) {
 
 function normalizeCommand(command) {
   return command
-    .replace(/(?:\/[^\s"']+)+/g, "<path>")
     .replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
-    .replace(/\b\d+\b/g, "<n>")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -96,7 +94,7 @@ function addSignal(session, ruleId, line, quantity, detail, confidence = "medium
 
 function safeRequest(text) {
   const compact = compactText(text, 1_000);
-  if (!compact || compact.startsWith("<environment_context>") || compact.startsWith("# AGENTS.md instructions")) return "";
+  if (!compact || compact.startsWith("<environment_context>") || compact.startsWith("# AGENTS.md instructions") || compact.startsWith("<subagent_notification>")) return "";
   return compact;
 }
 
@@ -116,6 +114,8 @@ export async function analyzeLog(filePath, window = {}) {
     ancestryCheckParentId: null,
     model: null,
     sourceRequest: "",
+    userRequests: [],
+    assistantMessages: [],
     lines: 0,
     badJson: 0,
     turns: 0,
@@ -132,6 +132,9 @@ export async function analyzeLog(filePath, window = {}) {
   const pendingCalls = new Map();
   const commandCounts = new Map();
   const readTargets = new Map();
+  const taskContextTasks = new Set();
+  let taskIndex = 0;
+  let activeRequest = "";
   let previousUsageSignature = null;
 
   const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
@@ -169,11 +172,23 @@ export async function analyzeLog(filePath, window = {}) {
       session.windowStart = session.start;
       session.windowEnd = session.end;
     }
-    if (evt.type === "event_msg" && payload.type === "user_message" && !session.sourceRequest) {
-      session.sourceRequest = safeRequest(payload.message || payload.text_elements?.join(" "));
+    const rememberRequest = (text) => {
+      const request = safeRequest(text);
+      if (!request || request === activeRequest) return;
+      activeRequest = request;
+      taskIndex += 1;
+      session.userRequests.push({ taskIndex, line: session.lines, timestamp, text: request });
+      if (!session.sourceRequest) session.sourceRequest = request;
+    };
+    if (evt.type === "event_msg" && payload.type === "user_message") {
+      rememberRequest(payload.message || payload.text_elements?.join(" "));
     }
-    if (evt.type === "response_item" && payload.type === "message" && payload.role === "user" && !session.sourceRequest) {
-      session.sourceRequest = safeRequest(contentText(payload.content));
+    if (evt.type === "response_item" && payload.type === "message" && payload.role === "user") {
+      rememberRequest(contentText(payload.content));
+    }
+    if (evt.type === "response_item" && payload.type === "message" && payload.role === "assistant") {
+      const text = compactText(contentText(payload.content), 700);
+      if (text) session.assistantMessages.push({ line: session.lines, timestamp, taskIndex, text });
     }
     if (evt.type === "event_msg" && payload.type === "token_count" && payload.info) {
       const total = payload.info.total_token_usage;
@@ -193,23 +208,36 @@ export async function analyzeLog(filePath, window = {}) {
     if (evt.type === "response_item" && ["function_call", "custom_tool_call"].includes(payload.type)) {
       const command = extractCommand(payload);
       const normalized = normalizeCommand(command || payload.name || "unknown");
-      const call = { line: session.lines, timestamp, name: payload.name || "tool", command, normalized };
+      const call = { line: session.lines, timestamp, taskIndex, activeRequest, name: payload.name || "tool", command, normalized, outputBytes: null, failed: null, outputPreview: "" };
       session.toolCalls.push(call);
       if (payload.call_id) pendingCalls.set(payload.call_id, call);
-      commandCounts.set(normalized, (commandCounts.get(normalized) || 0) + 1);
+      const commandKey = `${taskIndex}|${normalized}`;
+      if (!commandCounts.has(commandKey)) commandCounts.set(commandKey, []);
+      commandCounts.get(commandKey).push(call);
+      if (/npm run task:context\s+--/.test(command)) taskContextTasks.add(taskIndex);
+      if (taskContextTasks.has(taskIndex) && /(?:cat|sed\s+-n)[^\n]*(?:AGENTS\.md|portable-agent-instructions\.md)/.test(command)) {
+        addSignal(session, "instruction-reread-after-task-context", session.lines, 1, command, "high");
+      }
       if (/multi_agent.*spawn_agent|spawn_agent/.test(payload.name || command)) {
         session.agentLinks.push({ type: "spawn", line: session.lines, detail: compactText(command, 500) });
       }
-      const readMatch = command.match(/(?:sed\s+-n\s+[^ ]+\s+|cat\s+|rg\s+[^|;]*\s+)([^\s|;]+)$/);
+      const readMatch = command.match(/^(?:sed\s+-n\s+[^ ]+\s+|cat\s+)([^\s|;]+)$/);
       if (readMatch) {
         const target = readMatch[1];
-        readTargets.set(target, (readTargets.get(target) || 0) + 1);
+        const readKey = `${taskIndex}|${command.split(/\s+/)[0]}|${target}`;
+        if (!readTargets.has(readKey)) readTargets.set(readKey, []);
+        readTargets.get(readKey).push(call);
       }
     }
     if (evt.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(payload.type)) {
       const output = typeof payload.output === "string" ? payload.output : JSON.stringify(payload.output || "");
       const bytes = Buffer.byteLength(output);
       const call = pendingCalls.get(payload.call_id);
+      if (call) {
+        call.outputBytes = bytes;
+        call.failed = isFailure(output);
+        call.outputPreview = compactText(output, 240);
+      }
       if (bytes > LARGE_OUTPUT_BYTES) {
         session.largeOutputBytes += bytes;
         addSignal(session, "large-tool-output", session.lines, bytes, `${call?.name || "tool"}: ${compactText(output, 180)}`, "high");
@@ -223,11 +251,13 @@ export async function analyzeLog(filePath, window = {}) {
     }
   }
 
-  for (const [command, count] of commandCounts) {
-    if (count >= 3) addSignal(session, "repeated-command", session.toolCalls.find((call) => call.normalized === command)?.line, count, command);
+  for (const [commandKey, calls] of commandCounts) {
+    if (calls.length >= 3) {
+      addSignal(session, "repeated-command-within-task", calls[0].line, calls.length, `${commandKey.split("|").slice(1).join("|")} | lines ${calls.map((call) => call.line).join(",")}`);
+    }
   }
-  for (const [target, count] of readTargets) {
-    if (count >= 2) addSignal(session, "repeated-read", session.toolCalls.find((call) => call.command.includes(target))?.line, count, target);
+  for (const [readKey, calls] of readTargets) {
+    if (calls.length >= 2) addSignal(session, "repeated-file-read-within-task", calls[0].line, calls.length, `${readKey} | lines ${calls.map((call) => call.line).join(",")}`);
   }
   for (let i = 1; i < session.failures.length; i += 1) {
     const current = session.failures[i];
@@ -368,20 +398,46 @@ export function buildRankings(sessions, trees) {
 }
 
 function packetFor(session, tree, eventLimit) {
+  const signals = session.signals.slice(0, Math.min(25, eventLimit));
+  const citedLines = new Set(signals.flatMap((signal) => [signal.line, ...(signal.detail.match(/\b\d+\b/g) || []).map(Number)]));
+  const relatedCalls = session.toolCalls.filter((call) => [...citedLines].some((line) => Math.abs(call.line - line) <= 3));
+  const toolCandidates = [...new Map([
+    ...relatedCalls,
+    ...session.toolCalls.slice(0, 5),
+    ...session.toolCalls.slice(-5),
+  ].map((call) => [call.line, call])).values()];
   const events = [
-    ...session.signals.map((item) => ({ kind: "signal", ...item })),
-    ...session.failures.map((item) => ({ kind: "failure", ...item })),
-    ...session.toolCalls.map((item) => ({ kind: "tool", line: item.line, timestamp: item.timestamp, name: item.name, command: item.command })),
+    ...signals.map((item) => ({ kind: "signal", ...item })),
+    ...session.failures.slice(0, 10).map((item) => ({ kind: "failure", ...item })),
+    ...toolCandidates.map((item) => ({
+      kind: "tool", line: item.line, timestamp: item.timestamp, taskIndex: item.taskIndex,
+      activeRequest: item.activeRequest, name: item.name, command: item.command,
+      outputBytes: item.outputBytes, failed: item.failed, outputPreview: item.outputPreview,
+    })),
   ].sort((a, b) => a.line - b.line).slice(0, eventLimit);
+  const eventTaskIndexes = new Set(events.map((item) => item.taskIndex).filter(Boolean));
+  const userRequests = session.userRequests.filter((item) => eventTaskIndexes.has(item.taskIndex));
+  const nearbyUsage = [];
+  for (const event of events) {
+    const after = session.turnUsage.find((usage) => usage.line >= event.line);
+    if (after) nearbyUsage.push(after);
+  }
+  const turnUsage = [...new Map([
+    session.turnUsage[0],
+    ...nearbyUsage,
+    session.turnUsage.at(-1),
+  ].filter(Boolean).map((usage) => [usage.line, usage])).values()].sort((a, b) => a.line - b.line);
   const packet = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     session: {
       id: session.id, path: session.path, start: session.start, end: session.end,
       cwd: session.cwd, model: session.model, sourceRequest: session.sourceRequest,
       metrics: session.metrics, completions: session.completions, badJson: session.badJson,
     },
     taskTree: tree,
-    turnUsage: session.turnUsage,
+    userRequests,
+    finalAssistantMessages: session.assistantMessages.slice(-3),
+    turnUsage,
     events,
     escalation: "Request bounded source windows by path and line number only when this packet cannot establish necessity.",
   };
@@ -389,6 +445,17 @@ function packetFor(session, tree, eventLimit) {
   while (Buffer.byteLength(encoded) > PACKET_BYTE_LIMIT && packet.events.length > 5) {
     packet.events.pop();
     encoded = stableJson(packet);
+  }
+  while (Buffer.byteLength(encoded) > PACKET_BYTE_LIMIT && packet.turnUsage.length > 2) {
+    packet.turnUsage.splice(-2, 1);
+    encoded = stableJson(packet);
+  }
+  while (Buffer.byteLength(encoded) > PACKET_BYTE_LIMIT && packet.userRequests.length > 1) {
+    packet.userRequests.pop();
+    encoded = stableJson(packet);
+  }
+  if (Buffer.byteLength(encoded) > PACKET_BYTE_LIMIT) {
+    packet.finalAssistantMessages = packet.finalAssistantMessages.slice(-1);
   }
   return packet;
 }
@@ -424,12 +491,12 @@ export async function run(options) {
   const output = path.resolve(options.output);
   fs.rmSync(path.join(output, "packets"), { recursive: true, force: true });
   const manifest = {
-    schemaVersion: 1, since: since.toISOString(), until: until.toISOString(), roots,
+    schemaVersion: 2, detectorVersion: "v1-calibrated", since: since.toISOString(), until: until.toISOString(), roots,
     includedCount: sessions.length, excludedCount: excluded.length,
     thresholds: { largeOutputBytes: LARGE_OUTPUT_BYTES, forkHistoryBurstMs: FORK_HISTORY_BURST_MS, packetEventLimit: options.packetEventLimit, packetByteLimit: PACKET_BYTE_LIMIT },
   };
   writeJson(path.join(output, "run-manifest.json"), manifest);
-  writeJsonl(path.join(output, "sessions.jsonl"), sessions.map(({ toolCalls, failures, turnUsage, agentLinks, excerpts, ...session }) => session));
+  writeJsonl(path.join(output, "sessions.jsonl"), sessions.map(({ toolCalls, failures, turnUsage, agentLinks, excerpts, userRequests, assistantMessages, ...session }) => session));
   writeJsonl(path.join(output, "task-trees.jsonl"), trees);
   writeJson(path.join(output, "rankings.json"), rankings);
   writeJson(path.join(output, "scanner-warnings.json"), { excluded, malformedSessions: sessions.filter((item) => item.badJson).map((item) => ({ id: item.id, badJson: item.badJson })) });
