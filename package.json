@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "agent:analyze-log": "node scripts/analyze-log.mjs",
+    "agent:rank-context-waste": "node scripts/rank-context-waste.mjs",
+    "test": "node --test test/*.test.mjs",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },

@@ -36,6 +36,21 @@ yarn agent:analyze-log <rollout.jsonl> --all
 improve in the agent flow, `--workflow-waste` is the focused mode; run it first,
 then inspect only the cited lines before proposing instruction or helper changes.
 
+For a multi-log time window, run the streaming corpus scanner instead of invoking
+the single-log analyzer in a shell loop:
+
+```bash
+yarn agent:rank-context-waste \
+  --since <inclusive-ISO-timestamp> \
+  --until <exclusive-ISO-timestamp> \
+  --output <analysis-directory>
+```
+
+The scanner uses deduplicated per-turn token usage inside the requested window,
+groups sub-agents through explicit `parent_thread_id` metadata, and emits bounded
+review packets. Its signal rankings are candidate selectors, not verdicts that
+the detected operations were unnecessary.
+
 If repo context is also needed, use `bash bash/task-context.sh --skip-pull status`
 so the safety scan does not detach active submodules just to inspect logs.
 
