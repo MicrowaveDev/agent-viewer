@@ -137,6 +137,7 @@ export async function analyzeLog(filePath, window = {}) {
   let taskIndex = 0;
   let activeRequest = "";
   let previousUsageSignature = null;
+  let windowLines = 0;
 
   const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
   for await (const rawLine of rl) {
@@ -173,6 +174,7 @@ export async function analyzeLog(filePath, window = {}) {
       session.windowStart = session.start;
       session.windowEnd = session.end;
     }
+    windowLines += 1;
     const rememberRequest = (text) => {
       const request = safeRequest(text);
       if (!request || request === activeRequest) return;
@@ -293,6 +295,7 @@ export async function analyzeLog(filePath, window = {}) {
   if (window.since || window.until) {
     session.start = session.windowStart;
     session.end = session.windowEnd;
+    session.lines = windowLines;
   }
   return session;
 }
