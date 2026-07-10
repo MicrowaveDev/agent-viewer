@@ -290,6 +290,10 @@ export async function analyzeLog(filePath, window = {}) {
     signals: session.signals.length,
     largeOutputBytes: session.largeOutputBytes,
   };
+  if (window.since || window.until) {
+    session.start = session.windowStart;
+    session.end = session.windowEnd;
+  }
   return session;
 }
 
