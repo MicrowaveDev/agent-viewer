@@ -483,6 +483,8 @@ export async function run(options) {
   const excluded = [];
   for (const filePath of candidates) {
     const session = await analyzeLog(filePath, { since, until });
+    const sessionStart = session.start ? new Date(session.start) : null;
+    if (!session.windowStart && sessionStart && sessionStart >= until) continue;
     if (!session.windowStart) excluded.push({ path: filePath, reason: session.start ? "outside-window" : "missing-timestamp" });
     else sessions.push(session);
   }
