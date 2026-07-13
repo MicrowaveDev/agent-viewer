@@ -181,14 +181,6 @@ function parseJSONLChunk(content, loadState, isDone) {
   return { events, plainText: plainLines.join("\n") };
 }
 
-function redactGeneratedImagePayload(p) {
-  if (!p || !String(p.type || "").startsWith("image_generation_")) return;
-  if (typeof p.result === "string" && p.result.length > 0) {
-    p.result_bytes = new Blob([p.result]).size;
-    p.result = "[redacted generated image base64]";
-  }
-}
-
 // --- Codex format detection ---
 
 function isCodexFormat(events) {
@@ -495,67 +487,10 @@ async function loadInitialFiles() {
   }
 }
 
-function cleanForCopy(content) {
-  if (!content) return "";
-  return content
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        const evt = JSON.parse(line);
-        const p = evt.payload;
-        if (!p) return JSON.stringify(evt);
-
-        // Drop entire noise-only events
-        if (p.type === "token_count") return null;
-        if (p.type === "agent_message") return null;
-        if (p.type === "agent_reasoning") return null;
-        redactGeneratedImagePayload(p);
-
-        // session_meta: keep only useful fields
-        if (evt.type === "session_meta") {
-          evt.payload = {
-            originator: p.originator,
-            cli_version: p.cli_version,
-            model_provider: p.model_provider,
-            cwd: p.cwd,
-            git: p.git ? { branch: p.git.branch } : undefined,
-          };
-          return JSON.stringify(evt);
-        }
-
-        // turn_context: keep model + effort only
-        if (evt.type === "turn_context") {
-          evt.payload = { model: p.model, effort: p.effort };
-          return JSON.stringify(evt);
-        }
-
-        // task_started: drop noisy fields
-        if (p.type === "task_started") {
-          delete p.model_context_window;
-          delete p.collaboration_mode_kind;
-        }
-
-        // reasoning: drop encrypted_content
-        delete p.encrypted_content;
-        // function_call / function_call_output: drop call_id
-        delete p.call_id;
-        // drop turn_id everywhere in payload
-        delete p.turn_id;
-
-        return JSON.stringify(evt);
-      } catch {
-        return line;
-      }
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
 function copyFileContent() {
   const content = state.fileContents[state.selectedFile];
   if (!content) return;
-  const cleaned = cleanForCopy(content);
+  const cleaned = AgentViewerExportCleaner.cleanForCopy(content);
   navigator.clipboard
     .writeText(cleaned)
     .then(() => showToast("Copied (cleaned)", "success"));

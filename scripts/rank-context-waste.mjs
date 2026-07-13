@@ -6,6 +6,21 @@ import path from "path";
 import readline from "readline";
 import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
+import {
+  ANALYSIS_SCHEMA_VERSION,
+  DETECTOR_VERSION,
+  OVERSIZED_INPUT_BYTES,
+  RAW_ARTIFACT_BYTES,
+  buildLifecycle,
+  collectToolPayloads,
+  correlateToolOutputs,
+  detectMeasuredWaste,
+  digestText,
+  extractCorrelation,
+  rawToolInput,
+  rawToolOutput,
+  redactSensitiveText,
+} from "./measurement-foundation.mjs";
 
 const LARGE_OUTPUT_BYTES = 20_000;
 const PACKET_EVENT_LIMIT = 50;
@@ -45,12 +60,7 @@ function stableJson(value, indent = 2) {
 }
 
 function compactText(value, max = 500) {
-  return String(value || "")
-    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, "[image redacted]")
-    .replace(/[A-Za-z0-9+/=]{500,}/g, "[large payload redacted]")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
+  return redactSensitiveText(value, max);
 }
 
 function contentText(content) {
@@ -60,18 +70,23 @@ function contentText(content) {
 }
 
 function extractCommand(payload) {
-  let detail = payload.arguments ?? payload.input ?? "";
+  const rawInput = rawToolInput(payload);
+  let detail = rawInput;
+  let structured = false;
   if (typeof detail === "string") {
     try {
       const parsed = JSON.parse(detail);
-      detail = parsed.cmd || parsed.command || parsed.query || detail;
+      detail = parsed.cmd || parsed.command || parsed.query || "";
+      structured = Boolean(detail);
     } catch {
-      // Keep the original string.
+      detail = "";
     }
   } else if (detail && typeof detail === "object") {
-    detail = detail.cmd || detail.command || detail.query || JSON.stringify(detail);
+    detail = detail.cmd || detail.command || detail.query || "";
+    structured = Boolean(detail);
   }
-  return compactText(detail, 700);
+  if (structured) return compactText(detail, 700);
+  return `${payload.name || "tool"} input bytes=${Buffer.byteLength(rawInput)} digest=${digestText(rawInput)}`;
 }
 
 function normalizeCommand(command) {
@@ -121,8 +136,10 @@ export async function analyzeLog(filePath, window = {}) {
     badJson: 0,
     turns: 0,
     toolCalls: [],
+    toolOutputs: [],
     failures: [],
     completions: 0,
+    completionEvents: [],
     largeOutputBytes: 0,
     finalUsage: null,
     turnUsage: [],
@@ -130,10 +147,8 @@ export async function analyzeLog(filePath, window = {}) {
     agentLinks: [],
     excerpts: [],
   };
-  const pendingCalls = new Map();
   const commandCounts = new Map();
   const readTargets = new Map();
-  const taskContextTasks = new Set();
   let taskIndex = 0;
   let activeRequest = "";
   let previousUsageSignature = null;
@@ -191,7 +206,7 @@ export async function analyzeLog(filePath, window = {}) {
     }
     if (evt.type === "response_item" && payload.type === "message" && payload.role === "assistant") {
       const text = compactText(contentText(payload.content), 700);
-      if (text) session.assistantMessages.push({ line: session.lines, timestamp, taskIndex, text });
+      if (text) session.assistantMessages.push({ line: session.lines, timestamp, taskIndex, phase: payload.phase || null, text });
     }
     if (evt.type === "event_msg" && payload.type === "token_count" && payload.info) {
       const total = payload.info.total_token_usage;
@@ -206,22 +221,27 @@ export async function analyzeLog(filePath, window = {}) {
         }
       }
     }
-    if (evt.type === "event_msg" && payload.type === "task_complete") session.completions += 1;
+    if (evt.type === "event_msg" && payload.type === "task_complete") {
+      session.completions += 1;
+      session.completionEvents.push({ line: session.lines, timestamp, taskIndex, hasFinalMessage: Boolean(payload.last_agent_message || payload.final_message) });
+    }
 
-    if (evt.type === "response_item" && ["function_call", "custom_tool_call"].includes(payload.type)) {
-      const command = extractCommand(payload);
-      const normalized = normalizeCommand(command || payload.name || "unknown");
-      const call = { line: session.lines, timestamp, taskIndex, activeRequest, name: payload.name || "tool", command, normalized, outputBytes: null, failed: null, outputPreview: "" };
+    const nestedTools = collectToolPayloads(evt);
+    for (const toolPayload of nestedTools.calls) {
+      const rawInput = rawToolInput(toolPayload);
+      const command = extractCommand(toolPayload);
+      const normalized = normalizeCommand(command || toolPayload.name || "unknown");
+      const call = {
+        line: session.lines, timestamp, taskIndex, activeRequest, name: toolPayload.name || "tool",
+        command, normalized, correlation: extractCorrelation(toolPayload), inputBytes: Buffer.byteLength(rawInput),
+        inputDigest: digestText(rawInput), rawInput, outputBytes: 0, outputCount: 0, failed: null,
+        attributionConfidence: "none", outputPreview: "",
+      };
       session.toolCalls.push(call);
-      if (payload.call_id) pendingCalls.set(payload.call_id, call);
       const commandKey = `${taskIndex}|${normalized}`;
       if (!commandCounts.has(commandKey)) commandCounts.set(commandKey, []);
       commandCounts.get(commandKey).push(call);
-      if (/npm run task:context\s+--/.test(command)) taskContextTasks.add(taskIndex);
-      if (taskContextTasks.has(taskIndex) && /(?:cat|sed\s+-n)[^\n]*(?:AGENTS\.md|portable-agent-instructions\.md)/.test(command)) {
-        addSignal(session, "instruction-reread-after-task-context", session.lines, 1, command, "high");
-      }
-      if (/multi_agent.*spawn_agent|spawn_agent/.test(payload.name || command)) {
+      if (/multi_agent.*spawn_agent|spawn_agent/.test(toolPayload.name || command)) {
         session.agentLinks.push({ type: "spawn", line: session.lines, detail: compactText(command, 500) });
       }
       const readMatch = command.match(/^(?:sed\s+-n\s+[^ ]+\s+|cat\s+)([^\s|;]+)$/);
@@ -232,27 +252,44 @@ export async function analyzeLog(filePath, window = {}) {
         readTargets.get(readKey).push(call);
       }
     }
-    if (evt.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(payload.type)) {
-      const output = typeof payload.output === "string" ? payload.output : JSON.stringify(payload.output || "");
-      const bytes = Buffer.byteLength(output);
-      const call = pendingCalls.get(payload.call_id);
-      if (call) {
-        call.outputBytes = bytes;
-        call.failed = isFailure(output);
-        call.outputPreview = compactText(output, 240);
-      }
-      if (bytes > LARGE_OUTPUT_BYTES) {
-        session.largeOutputBytes += bytes;
-        addSignal(session, "large-tool-output", session.lines, bytes, `${call?.name || "tool"}: ${compactText(output, 180)}`, "high");
-      }
-      if (isFailure(output)) {
-        session.failures.push({ line: session.lines, callLine: call?.line || null, detail: compactText(output, 300) });
-      }
-      if (/agent_id|thread_id/.test(output) && call && /spawn_agent/.test(call.name || call.command)) {
-        session.agentLinks.push({ type: "spawn-result", line: session.lines, detail: compactText(output, 500) });
-      }
+    for (const toolPayload of nestedTools.outputs) {
+      const rawOutput = rawToolOutput(toolPayload);
+      session.toolOutputs.push({
+        line: session.lines, timestamp, taskIndex, correlation: extractCorrelation(toolPayload),
+        rawBytes: Buffer.byteLength(rawOutput), outputDigest: digestText(rawOutput), rawOutput,
+      });
     }
   }
+
+  const attributions = correlateToolOutputs(session.toolCalls, session.toolOutputs);
+  for (const attribution of attributions) {
+    const { output, call, confidence, reason, candidateCount } = attribution;
+    output.callLine = call?.line || null;
+    output.attributionConfidence = confidence;
+    output.attributionReason = reason;
+    output.candidateCount = candidateCount;
+    if (call) {
+      call.outputBytes += output.rawBytes;
+      call.outputCount += 1;
+      call.failed = Boolean(call.failed || isFailure(output.rawOutput));
+      call.attributionConfidence = confidence;
+      call.outputPreview = `bytes=${output.rawBytes}; digest=${output.outputDigest}`;
+    }
+    if (output.rawBytes > LARGE_OUTPUT_BYTES) {
+      session.largeOutputBytes += output.rawBytes;
+      addSignal(session, "large-tool-output", output.line, output.rawBytes,
+        `callLine=${call?.line || "unmatched"}; confidence=${confidence}; digest=${output.outputDigest}`, confidence === "none" ? "low" : confidence);
+    }
+    if (isFailure(output.rawOutput)) {
+      session.failures.push({ line: output.line, callLine: call?.line || null, detail: `digest=${output.outputDigest}; attribution=${confidence}` });
+    }
+    if (/agent_id|thread_id/.test(output.rawOutput) && call && /spawn_agent/.test(call.name || call.command)) {
+      session.agentLinks.push({ type: "spawn-result", line: output.line, detail: `digest=${output.outputDigest}; attribution=${confidence}` });
+    }
+  }
+
+  session.taskLifecycle = buildLifecycle(session.userRequests, session.assistantMessages, session.completionEvents);
+  detectMeasuredWaste(session, (ruleId, line, quantity, detail, confidence) => addSignal(session, ruleId, line, quantity, detail, confidence));
 
   for (const [commandKey, calls] of commandCounts) {
     if (calls.length >= 3) {
@@ -291,6 +328,16 @@ export async function analyzeLog(filePath, window = {}) {
     failures: session.failures.length,
     signals: session.signals.length,
     largeOutputBytes: session.largeOutputBytes,
+    commandOutputBytes: session.toolOutputs.reduce((sum, output) => sum + output.rawBytes, 0),
+    attributedOutputCount: session.toolOutputs.filter((output) => output.callLine).length,
+    unmatchedOutputCount: session.toolOutputs.filter((output) => !output.callLine).length,
+    lowConfidenceOutputCount: session.toolOutputs.filter((output) => output.attributionConfidence === "low").length,
+    repeatedOversizedToolInputBytes: session.signals.filter((signal) => signal.ruleId === "repeated-oversized-tool-input").reduce((sum, signal) => sum + signal.quantity, 0),
+    instructionRereadsAfterTaskContext: session.signals.filter((signal) => signal.ruleId === "instruction-reread-after-successful-task-context").length,
+    rawArtifactReplayBytes: session.signals.filter((signal) => signal.ruleId === "raw-artifact-replay").reduce((sum, signal) => sum + signal.quantity, 0),
+    taskCount: session.taskLifecycle.length,
+    completedTaskCount: session.taskLifecycle.filter((task) => task.status !== "incomplete").length,
+    finalLinkedTaskCount: session.taskLifecycle.filter((task) => task.status === "complete-with-final").length,
   };
   if (window.since || window.until) {
     session.start = session.windowStart;
@@ -420,7 +467,9 @@ function packetFor(session, tree, eventLimit) {
     ...toolCandidates.map((item) => ({
       kind: "tool", line: item.line, timestamp: item.timestamp, taskIndex: item.taskIndex,
       activeRequest: item.activeRequest, name: item.name, command: item.command,
-      outputBytes: item.outputBytes, failed: item.failed, outputPreview: item.outputPreview,
+      correlation: item.correlation, inputBytes: item.inputBytes, inputDigest: item.inputDigest,
+      outputBytes: item.outputBytes, outputCount: item.outputCount, failed: item.failed,
+      attributionConfidence: item.attributionConfidence, outputPreview: item.outputPreview,
     })),
   ].sort((a, b) => a.line - b.line).slice(0, eventLimit);
   const eventTaskIndexes = new Set(events.map((item) => item.taskIndex).filter(Boolean));
@@ -436,7 +485,8 @@ function packetFor(session, tree, eventLimit) {
     session.turnUsage.at(-1),
   ].filter(Boolean).map((usage) => [usage.line, usage])).values()].sort((a, b) => a.line - b.line);
   const packet = {
-    schemaVersion: 2,
+    schemaVersion: ANALYSIS_SCHEMA_VERSION,
+    detectorVersion: DETECTOR_VERSION,
     session: {
       id: session.id, path: session.path, start: session.start, end: session.end,
       cwd: session.cwd, model: session.model, sourceRequest: session.sourceRequest,
@@ -444,6 +494,7 @@ function packetFor(session, tree, eventLimit) {
     },
     taskTree: tree,
     userRequests,
+    taskLifecycle: session.taskLifecycle,
     finalAssistantMessages: session.assistantMessages.slice(-3),
     turnUsage,
     events,
@@ -507,12 +558,12 @@ export async function run(options) {
     // The scanner also works from source archives without Git metadata.
   }
   const manifest = {
-    schemaVersion: 2, detectorVersion: "v1-calibrated", sourceCommit, since: since.toISOString(), until: until.toISOString(), roots,
+    schemaVersion: ANALYSIS_SCHEMA_VERSION, detectorVersion: DETECTOR_VERSION, sourceCommit, since: since.toISOString(), until: until.toISOString(), roots,
     includedCount: sessions.length, excludedCount: excluded.length,
-    thresholds: { largeOutputBytes: LARGE_OUTPUT_BYTES, forkHistoryBurstMs: FORK_HISTORY_BURST_MS, packetEventLimit: options.packetEventLimit, packetByteLimit: PACKET_BYTE_LIMIT },
+    thresholds: { largeOutputBytes: LARGE_OUTPUT_BYTES, oversizedInputBytes: OVERSIZED_INPUT_BYTES, rawArtifactBytes: RAW_ARTIFACT_BYTES, forkHistoryBurstMs: FORK_HISTORY_BURST_MS, packetEventLimit: options.packetEventLimit, packetByteLimit: PACKET_BYTE_LIMIT },
   };
   writeJson(path.join(output, "run-manifest.json"), manifest);
-  writeJsonl(path.join(output, "sessions.jsonl"), sessions.map(({ toolCalls, failures, turnUsage, agentLinks, excerpts, userRequests, assistantMessages, ...session }) => session));
+  writeJsonl(path.join(output, "sessions.jsonl"), sessions.map(({ toolCalls, toolOutputs, failures, turnUsage, agentLinks, excerpts, userRequests, assistantMessages, completionEvents, ...session }) => session));
   writeJsonl(path.join(output, "task-trees.jsonl"), trees);
   writeJson(path.join(output, "rankings.json"), rankings);
   writeJson(path.join(output, "scanner-warnings.json"), { excluded, malformedSessions: sessions.filter((item) => item.badJson).map((item) => ({ id: item.id, badJson: item.badJson })) });

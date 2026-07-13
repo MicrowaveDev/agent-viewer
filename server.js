@@ -4,6 +4,9 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
+import "./public/export-cleaner.js";
+
+const { cleanForCopy } = globalThis.AgentViewerExportCleaner;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 60653;
@@ -120,64 +123,6 @@ function copyFileToTemp(fileId, filePath) {
     repoPath: path.relative(__dirname, tempPath),
     compactPath: compactFilePath(tempPath),
   };
-}
-
-function redactGeneratedImagePayload(p) {
-  if (!p || !String(p.type || "").startsWith("image_generation_")) return;
-  if (typeof p.result === "string" && p.result.length > 0) {
-    p.result_bytes = Buffer.byteLength(p.result, "utf8");
-    p.result = "[redacted generated image base64]";
-  }
-}
-
-function cleanForCopy(content) {
-  if (!content) return "";
-  return content
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        const evt = JSON.parse(line);
-        const p = evt.payload;
-        if (!p) return JSON.stringify(evt);
-
-        if (p.type === "token_count") return null;
-        if (p.type === "agent_message") return null;
-        if (p.type === "agent_reasoning") return null;
-        redactGeneratedImagePayload(p);
-
-        if (evt.type === "session_meta") {
-          evt.payload = {
-            originator: p.originator,
-            cli_version: p.cli_version,
-            model_provider: p.model_provider,
-            cwd: p.cwd,
-            git: p.git ? { branch: p.git.branch } : undefined,
-          };
-          return JSON.stringify(evt);
-        }
-
-        if (evt.type === "turn_context") {
-          evt.payload = { model: p.model, effort: p.effort };
-          return JSON.stringify(evt);
-        }
-
-        if (p.type === "task_started") {
-          delete p.model_context_window;
-          delete p.collaboration_mode_kind;
-        }
-
-        delete p.encrypted_content;
-        delete p.call_id;
-        delete p.turn_id;
-
-        return JSON.stringify(evt);
-      } catch {
-        return line;
-      }
-    })
-    .filter(Boolean)
-    .join("\n");
 }
 
 // --- File offset tracking for tail-f ---
