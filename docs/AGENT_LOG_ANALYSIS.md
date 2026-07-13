@@ -67,10 +67,37 @@ causal savings. `--findings` bounds detector rows from 0 to 100; the default is
 20. Input/output bodies, commands, requests, and assistant messages are not
 included in comparison reports.
 
+Schema and detector versions must match by default. An incompatible comparison
+still writes its machine-readable report, then exits `2`. Use
+`--allow-incompatible` only for an explicitly informational comparison; never use
+it for a regression gate.
+
+Weekly production comparisons remain informational and exit `0` when `--gate` is
+absent. Deterministic fixture/CI comparisons can enable regression behavior:
+
+```bash
+yarn agent:compare-context \
+  --before <baseline-fixture-analysis> \
+  --after <candidate-fixture-analysis> \
+  --output <gate-report.json> \
+  --gate
+```
+
+The gate exits `1` when normalized rates increase for route rereads, context
+rereads, raw artifact replay, repeated oversized inputs, or unmatched/duplicated
+output attribution. It also exits `1` when completed-task or final-linked-task
+rates decrease. Finding rates use tasks as their denominator; attribution uses
+all discovered outputs. A larger corpus with the same rate is not a regression.
+
+Comparison schema version `2` includes `compatibility`, `normalizedRates`, and
+`gate` objects. `gate.verdict` is `informational`, `pass`, `fail`, or
+`incompatible`; `gate.reasons` contains stable category codes and the before/after
+numerators, denominators, rates, and observed rate delta.
+
 ## Measurement Schema
 
 Scanner outputs use schema version `3` and detector version
-`v2-measurement-foundation`. The run manifest records both versions and all byte
+`v3-regression-gates`. The run manifest records both versions and all byte
 thresholds. Review packets repeat the versions so detached packets remain
 interpretable.
 

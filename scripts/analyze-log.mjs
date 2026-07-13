@@ -295,6 +295,7 @@ if (mode === "all" || mode === "workflow-waste") {
       `- Attributed/unmatched/low-confidence outputs: ${measurement.metrics.attributedOutputCount}/${measurement.metrics.unmatchedOutputCount}/${measurement.metrics.lowConfidenceOutputCount}`,
       `- Repeated oversized tool-input bytes: ${measurement.metrics.repeatedOversizedToolInputBytes}`,
       `- Instruction rereads after successful task-context: ${measurement.metrics.instructionRereadsAfterTaskContext}`,
+      `- Route rereads after successful task-context: ${measurement.metrics.routeRereadsAfterTaskContext}`,
       `- Raw artifact replay bytes: ${measurement.metrics.rawArtifactReplayBytes}`,
       `- Tasks completed/final-linked/total: ${measurement.metrics.completedTaskCount}/${measurement.metrics.finalLinkedTaskCount}/${measurement.metrics.taskCount}`,
       `- Repeated command/tool families: ${

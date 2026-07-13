@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const ANALYSIS_SCHEMA_VERSION = 3;
-export const DETECTOR_VERSION = "v2-measurement-foundation";
+export const DETECTOR_VERSION = "v3-regression-gates";
 export const OVERSIZED_INPUT_BYTES = 8_000;
 export const RAW_ARTIFACT_BYTES = 4_000;
 
@@ -147,6 +147,12 @@ export function detectMeasuredWaste(session, addSignal) {
     const context = successfulContext.find((candidate) => candidate.taskIndex === call.taskIndex && candidate.line < call.line);
     if (context) addSignal("instruction-reread-after-successful-task-context", call.line, 1,
       `taskContextLine=${context.line}; rereadLine=${call.line}`, "high");
+  }
+  for (const call of session.toolCalls) {
+    if (!/(?:npm run find:repos|SUBMODULES\.md)/.test(call.command)) continue;
+    const context = successfulContext.find((candidate) => candidate.taskIndex === call.taskIndex && candidate.line < call.line);
+    if (context) addSignal("route-reread-after-successful-task-context", call.line, 1,
+      `taskContextLine=${context.line}; routeLine=${call.line}`, "high");
   }
 
   const attributedOutputs = session.toolOutputs.filter((output) => output.callLine && output.rawBytes >= RAW_ARTIFACT_BYTES);

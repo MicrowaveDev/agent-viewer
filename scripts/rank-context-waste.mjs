@@ -335,6 +335,7 @@ export async function analyzeLog(filePath, window = {}) {
     repeatedOversizedToolInputBytes: session.signals.filter((signal) => signal.ruleId === "repeated-oversized-tool-input").reduce((sum, signal) => sum + signal.quantity, 0),
     instructionRereadsAfterTaskContext: session.signals.filter((signal) => signal.ruleId === "instruction-reread-after-successful-task-context").length,
     rawArtifactReplayBytes: session.signals.filter((signal) => signal.ruleId === "raw-artifact-replay").reduce((sum, signal) => sum + signal.quantity, 0),
+    routeRereadsAfterTaskContext: session.signals.filter((signal) => signal.ruleId === "route-reread-after-successful-task-context").length,
     taskCount: session.taskLifecycle.length,
     completedTaskCount: session.taskLifecycle.filter((task) => task.status !== "incomplete").length,
     finalLinkedTaskCount: session.taskLifecycle.filter((task) => task.status === "complete-with-final").length,

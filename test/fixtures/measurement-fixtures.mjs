@@ -41,16 +41,18 @@ export function lifecycleAndWasteFixture() {
     output(3, "context", JSON.stringify({ exit_code: 0, output: "context complete" })),
     event(4, "response_item", { type: "function_call", name: "exec_command", call_id: "reread", arguments: JSON.stringify({ cmd: "sed -n '1,80p' AGENTS.md" }) }),
     output(5, "reread", "instructions"),
-    call(6, "large-one", "fixture_tool", oversizedInput),
-    output(7, "large-one", artifact),
-    call(8, "large-two", "fixture_tool", oversizedInput),
-    output(9, "large-two", "second result"),
-    call(10, "replay", "fixture_tool", `prefix:${artifact}:suffix`),
-    output(11, "replay", "replay accepted"),
-    event(12, "response_item", { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "Task one done" }] }),
-    event(13, "event_msg", { type: "task_complete" }),
-    event(14, "event_msg", { type: "user_message", message: "Complete task two" }),
-    event(15, "event_msg", { type: "task_complete", final_message: "Task two done" }),
+    event(6, "response_item", { type: "function_call", name: "exec_command", call_id: "route", arguments: JSON.stringify({ cmd: "npm run find:repos -- fixture" }) }),
+    output(7, "route", "agent-viewer"),
+    call(8, "large-one", "fixture_tool", oversizedInput),
+    output(9, "large-one", artifact),
+    call(10, "large-two", "fixture_tool", oversizedInput),
+    output(11, "large-two", "second result"),
+    call(12, "replay", "fixture_tool", `prefix:${artifact}:suffix`),
+    output(13, "replay", "replay accepted"),
+    event(14, "response_item", { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "Task one done" }] }),
+    event(15, "event_msg", { type: "task_complete" }),
+    event(16, "event_msg", { type: "user_message", message: "Complete task two" }),
+    event(17, "event_msg", { type: "task_complete", final_message: "Task two done" }),
   ];
 }
 
@@ -66,4 +68,47 @@ export function cleanedExportFixture() {
     }),
     event(2, "event_msg", { type: "image_generation_complete", result: "base64-placeholder", saved_path: "/fixture/image.png" }),
   ];
+}
+
+function comparisonSummary(overrides = {}) {
+  return {
+    schemaVersion: 3,
+    detectorVersion: "v3-regression-gates",
+    since: "2026-07-01T00:00:00.000Z",
+    until: "2026-07-02T00:00:00.000Z",
+    sessionCount: 1,
+    metrics: {
+      taskCount: 10,
+      completedTaskCount: 10,
+      finalLinkedTaskCount: 10,
+      attributedOutputCount: 20,
+      unmatchedOutputCount: 0,
+      lowConfidenceOutputCount: 0,
+      ...overrides.metrics,
+    },
+    detectors: { ...overrides.detectors },
+    ...Object.fromEntries(Object.entries(overrides).filter(([key]) => !["metrics", "detectors"].includes(key))),
+  };
+}
+
+export function comparisonGateFixtures() {
+  const findings = {
+    "route-reread-after-successful-task-context": { occurrences: 2, quantity: 2 },
+    "instruction-reread-after-successful-task-context": { occurrences: 2, quantity: 2 },
+    "raw-artifact-replay": { occurrences: 2, quantity: 8_000 },
+    "repeated-oversized-tool-input": { occurrences: 2, quantity: 16_000 },
+  };
+  const clean = comparisonSummary();
+  const regressed = comparisonSummary({
+    metrics: { completedTaskCount: 8, finalLinkedTaskCount: 7, unmatchedOutputCount: 2, lowConfidenceOutputCount: 2 },
+    detectors: findings,
+  });
+  return {
+    positive: { before: regressed, after: clean },
+    negative: { before: clean, after: regressed },
+    incompatible: {
+      before: clean,
+      after: comparisonSummary({ detectorVersion: "v4-incompatible-fixture" }),
+    },
+  };
 }
