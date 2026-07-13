@@ -51,6 +51,94 @@ groups sub-agents through explicit `parent_thread_id` metadata, and emits bounde
 review packets. Its signal rankings are candidate selectors, not verdicts that
 the detected operations were unnecessary.
 
+Compare two completed scanner outputs with the deterministic, bounded comparison
+command:
+
+```bash
+yarn agent:compare-context \
+  --before <before-analysis-directory> \
+  --after <after-analysis-directory> \
+  --output <comparison.json> \
+  --findings 20
+```
+
+The comparison reports observed metric and detector deltas. It does not estimate
+causal savings. `--findings` bounds detector rows from 0 to 100; the default is
+20. Input/output bodies, commands, requests, and assistant messages are not
+included in comparison reports.
+
+Schema and detector versions must match by default. An incompatible comparison
+still writes its machine-readable report, then exits `2`. Use
+`--allow-incompatible` only for an explicitly informational comparison; never use
+it for a regression gate.
+
+Weekly production comparisons remain informational and exit `0` when `--gate` is
+absent. Deterministic fixture/CI comparisons can enable regression behavior:
+
+```bash
+yarn agent:compare-context \
+  --before <baseline-fixture-analysis> \
+  --after <candidate-fixture-analysis> \
+  --output <gate-report.json> \
+  --gate
+```
+
+The gate exits `1` when normalized rates increase for route rereads, context
+rereads, raw artifact replay, repeated oversized inputs, or unmatched/duplicated
+output attribution. It also exits `1` when completed-task or final-linked-task
+rates decrease. Finding rates use tasks as their denominator; attribution uses
+all discovered outputs. A larger corpus with the same rate is not a regression.
+
+Comparison schema version `2` includes `compatibility`, `normalizedRates`, and
+`gate` objects. `gate.verdict` is `informational`, `pass`, `fail`, or
+`incompatible`; `gate.reasons` contains stable category codes and the before/after
+numerators, denominators, rates, and observed rate delta.
+
+## Measurement Schema
+
+Scanner outputs use schema version `3` and detector version
+`v3-regression-gates`. The run manifest records both versions and all byte
+thresholds. Review packets repeat the versions so detached packets remain
+interpretable.
+
+The cleaned viewer export keeps correlation metadata needed for measurement:
+
+- session `id`, `thread_source`, `parent_thread_id`, and correlation-only `source` ancestry
+- `call_id`, `session_id`, `thread_id`, `parent_thread_id`, `turn_id`, and `task_id`
+- generated-image byte counts and paths, with generated-image bodies redacted
+
+Encrypted content, generated-image bodies, token-count events, agent-message
+events, and agent-reasoning events remain excluded. Opaque tool input and output
+bodies are never written to scanner reports. They are represented by byte counts
+and short SHA-256 digests; structured shell commands are retained in bounded,
+secret-redacted form.
+
+Output attribution has explicit confidence:
+
+- `high`: a unique call ID, or a duplicate call ID disambiguated by session/thread ID
+- `medium`: a unique session/thread correlation without a call ID
+- `low`: deterministic FIFO attribution among unresolved duplicate call IDs
+- `none`: no matching call
+
+Nested and batched tool-output objects are traversed once per JSON object. Reported
+output bytes therefore count each discovered output record once. Attribution
+metrics include matched, unmatched, and low-confidence output counts.
+
+Session metrics include measured totals for command output bytes, repeated
+oversized tool-input bytes, instruction rereads after a successfully attributed
+`task:context` call, raw artifact replay bytes, and task/completion/final linkage.
+These are observations under recorded thresholds, not claims that the operations
+were unnecessary or that removing them would save the measured amount.
+
+The scanner writes:
+
+- `run-manifest.json`: versions, window, source commit, roots, and thresholds
+- `sessions.jsonl`: bounded session metrics, detector findings, and task lifecycle
+- `task-trees.jsonl`: explicit parent-ancestry groupings
+- `rankings.json`: deterministic candidate rankings
+- `scanner-warnings.json`: exclusions and malformed-record counts
+- `packets/*.json`: bounded evidence packets without raw tool payload bodies
+
 If repo context is also needed, use `bash bash/task-context.sh --skip-pull status`
 so the safety scan does not detach active submodules just to inspect logs.
 

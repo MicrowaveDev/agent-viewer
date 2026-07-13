@@ -3,6 +3,8 @@
 import fs from "fs";
 import path from "path";
 import readline from "readline";
+import { analyzeLog as analyzeMeasurementLog } from "./rank-context-waste.mjs";
+import { ANALYSIS_SCHEMA_VERSION, DETECTOR_VERSION, digestText, redactSensitiveText } from "./measurement-foundation.mjs";
 
 const args = process.argv.slice(2);
 const filePath = args.find((arg) => !arg.startsWith("-"));
@@ -50,13 +52,7 @@ function addCount(map, key) {
 }
 
 function compactText(text, max = 220) {
-  return String(text || "")
-    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, " [image] ")
-    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, "[image base64 redacted]")
-    .replace(/[A-Za-z0-9+/=]{500,}/g, "[base64 redacted]")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
+  return redactSensitiveText(String(text || "").replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, " [image] "), max);
 }
 
 function formatBytes(bytes) {
@@ -196,7 +192,8 @@ function collectEvent(evt, line, lineBytes) {
       summary.toolFailures.push({
         line: summary.lines,
         timestamp: evt.timestamp,
-        output: compactText(output, 220),
+        bytes: Buffer.byteLength(output, "utf8"),
+        digest: digestText(output),
       });
     }
     if (Buffer.byteLength(output, "utf8") > 20000) {
@@ -204,7 +201,7 @@ function collectEvent(evt, line, lineBytes) {
         line: summary.lines,
         timestamp: evt.timestamp,
         bytes: Buffer.byteLength(output, "utf8"),
-        preview: compactText(output, 160),
+        digest: digestText(output),
       });
     }
     return;
@@ -230,6 +227,8 @@ for await (const line of rl) {
     summary.badJson += 1;
   }
 }
+
+const measurement = await analyzeMeasurementLog(absPath);
 
 function topEntries(map, max = 12) {
   return [...map.entries()]
@@ -292,6 +291,13 @@ if (mode === "all" || mode === "workflow-waste") {
       `- Tool calls: ${summary.toolCalls.length}`,
       `- Tool failures: ${summary.toolFailures.length}`,
       `- Large tool outputs over 20 KB: ${summary.largeToolOutputs.length}`,
+      `- Command output bytes: ${measurement.metrics.commandOutputBytes}`,
+      `- Attributed/unmatched/low-confidence outputs: ${measurement.metrics.attributedOutputCount}/${measurement.metrics.unmatchedOutputCount}/${measurement.metrics.lowConfidenceOutputCount}`,
+      `- Repeated oversized tool-input bytes: ${measurement.metrics.repeatedOversizedToolInputBytes}`,
+      `- Instruction rereads after successful task-context: ${measurement.metrics.instructionRereadsAfterTaskContext}`,
+      `- Route rereads after successful task-context: ${measurement.metrics.routeRereadsAfterTaskContext}`,
+      `- Raw artifact replay bytes: ${measurement.metrics.rawArtifactReplayBytes}`,
+      `- Tasks completed/final-linked/total: ${measurement.metrics.completedTaskCount}/${measurement.metrics.finalLinkedTaskCount}/${measurement.metrics.taskCount}`,
       `- Repeated command/tool families: ${
         repeated.length
           ? repeated.map(([key, count]) => `${key} (${count})`).join(", ")
@@ -304,8 +310,18 @@ if (mode === "all" || mode === "workflow-waste") {
     "Tool Failures",
     summary.toolFailures
       .slice(0, 10)
-      .map((item) => `- line ${item.line}: ${item.output}`)
+      .map((item) => `- line ${item.line}: ${formatBytes(item.bytes)} digest=${item.digest}`)
       .join("\n"),
+  );
+
+  printSection(
+    "Measurement Contract",
+    [
+      `- Schema version: ${ANALYSIS_SCHEMA_VERSION}`,
+      `- Detector version: ${DETECTOR_VERSION}`,
+      "- Counts are observed measurements; they do not estimate causal savings.",
+      "- Tool payload bodies are represented by byte counts and digests.",
+    ].join("\n"),
   );
 
   printSection(
