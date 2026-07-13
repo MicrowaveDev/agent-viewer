@@ -5,6 +5,11 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 import "./public/export-cleaner.js";
+import {
+  imageRefsFromEvent,
+  normalizePromptPreview,
+  userPromptFromEvent,
+} from "./prompt-metadata.js";
 
 const { cleanForCopy } = globalThis.AgentViewerExportCleaner;
 
@@ -16,6 +21,7 @@ const tempDir = path.join(__dirname, "temp");
 const DEFAULT_CHUNK_SIZE = 512 * 1024;
 const MAX_CHUNK_SIZE = 2 * 1024 * 1024;
 const MAX_LIVE_UPDATE_BYTES = MAX_CHUNK_SIZE;
+const METADATA_CACHE_VERSION = 2;
 
 // --- Auto-detect Claude Code temp directory ---
 
@@ -138,6 +144,10 @@ function loadMetadataCache() {
   try {
     const raw = fs.readFileSync(metadataCachePath, "utf8");
     const parsed = JSON.parse(raw);
+    if (parsed.version !== METADATA_CACHE_VERSION) {
+      console.log("Ignoring stale metadata cache");
+      return;
+    }
     const entries = parsed.files && typeof parsed.files === "object"
       ? parsed.files
       : parsed;
@@ -166,7 +176,7 @@ function saveMetadataCache() {
       metadataCachePath,
       JSON.stringify(
         {
-          version: 1,
+          version: METADATA_CACHE_VERSION,
           generatedAt: new Date().toISOString(),
           files,
         },
@@ -185,75 +195,6 @@ function removeMetadataCacheEntry(filePath) {
     metadataCacheDirty = true;
     saveMetadataCache();
   }
-}
-
-function normalizePromptPreview(text) {
-  return String(text || "")
-    .replace(/<ide_[^>]+>[\s\S]*?<\/ide_[^>]+>/g, " ")
-    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, " [image] ")
-    .replace(/<image\s*\/>/gi, " [image] ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function firstTextFromContent(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((block) => block?.type === "text" || block?.type === "input_text")
-    .map((block) => block.text)
-    .filter(Boolean)
-    .join(" ");
-}
-
-function userPromptFromEvent(evt) {
-  const payload = evt.payload;
-
-  if (evt.type === "event_msg" && payload?.type === "user_message") {
-    return payload.message || payload.text_elements?.join(" ");
-  }
-
-  if (
-    evt.type === "response_item" &&
-    payload?.type === "message" &&
-    payload.role === "user"
-  ) {
-    const text = firstTextFromContent(payload.content);
-    if (text.startsWith("# AGENTS.md instructions")) return "";
-    if (text.startsWith("<environment_context>")) return "";
-    return text;
-  }
-
-  if (evt.type === "user") {
-    return firstTextFromContent(evt.message?.content);
-  }
-
-  return "";
-}
-
-function imageRefsFromEvent(evt) {
-  const payload = evt.payload;
-  const refs = [];
-
-  if (evt.type === "event_msg" && payload?.type === "user_message") {
-    refs.push(...(payload.images || []));
-    refs.push(...(payload.local_images || []));
-  }
-
-  if (
-    evt.type === "response_item" &&
-    payload?.type === "message" &&
-    payload.role === "user" &&
-    Array.isArray(payload.content)
-  ) {
-    for (const block of payload.content) {
-      if (block?.type === "input_image" && block.image_url) refs.push(block.image_url);
-      if (block?.type === "local_image" && block.path) refs.push(block.path);
-    }
-  }
-
-  return refs.filter(Boolean);
 }
 
 function imageCountFromRawPromptLine(line) {
