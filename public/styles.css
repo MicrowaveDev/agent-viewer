@@ -410,3 +410,5 @@ mark.search-highlight.active {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+.source-grok { background: rgba(210,160,57,0.2); color: #d2a039; }
