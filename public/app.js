@@ -197,7 +197,9 @@ function renderFileList() {
     .map((f) => {
       const isCodex = f.source === "codex";
       const isClaudeProject = f.source === "claude-project";
-      const sourceBadge = isCodex
+      const sourceBadge = f.source === "grok"
+        ? '<span class="source-badge source-grok">Gr</span>'
+        : isCodex
         ? '<span class="source-badge source-codex">Cx</span>'
         : isClaudeProject
           ? '<span class="source-badge source-claude-project">Cp</span>'
@@ -216,7 +218,7 @@ function renderFileList() {
             )
             .join("")}${imagePreviews.length > 2 ? `<span class="file-image-more">+${imagePreviews.length - 2}</span>` : ""}</div>`
         : "";
-      return `<div class="file-item ${f.id === state.selectedFile ? "active" : ""} ${f.hasUpdate ? "has-update" : ""}"
+      return `<div data-testid="file-item" class="file-item ${f.id === state.selectedFile ? "active" : ""} ${f.hasUpdate ? "has-update" : ""}"
            onclick="selectFile('${f.id}')">
         <div class="file-id" title="${escapeHtml(displayTitle)}">${sourceBadge}<span class="file-title">${escapeHtml(displayTitle)}</span></div>
         ${previewImages}
@@ -259,7 +261,9 @@ function renderContent() {
 
   if (events.length > 0) {
     const isCodex = file?.source === "codex" || isCodexFormat(events);
-    const renderer = isCodex
+    const renderer = file?.source === "grok"
+      ? renderGrokEvent
+      : isCodex
       ? (event) => renderCodexEvent(event, file)
       : renderEvent;
     els.outputContent.innerHTML = events.map(renderer).join("");
@@ -285,7 +289,9 @@ function renderChunk(content, file, isFirstChunk, loadState, isDone) {
   const { events, plainText } = parseJSONLChunk(content, loadState, isDone);
   if (events.length > 0) {
     const isCodex = file?.source === "codex" || isCodexFormat(events);
-    const renderer = isCodex
+    const renderer = file?.source === "grok"
+      ? renderGrokEvent
+      : isCodex
       ? (event) => renderCodexEvent(event, file)
       : renderEvent;
     const html = events.map(renderer).join("");
@@ -456,7 +462,7 @@ function sortFiles() {
 }
 
 function updateSourceLabel(data) {
-  return data.source === "codex"
+  return data.source === "grok" ? "Grok" : data.source === "codex"
     ? "Codex"
     : data.source === "claude-project"
       ? "Claude Project"
@@ -468,7 +474,7 @@ async function loadInitialFiles() {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   els.tasksDir.textContent =
-    [data.tasksDir, data.claudeProjectsDir, data.codexDir]
+    [data.tasksDir, data.claudeProjectsDir, data.codexDir, data.grokDir]
       .filter(Boolean)
       .join(" | ") ||
     "Not detected";
@@ -534,7 +540,7 @@ async function refresh() {
     const res = await fetch("/api/refresh", { method: "POST" });
     const data = await res.json();
     els.tasksDir.textContent =
-      [data.tasksDir, data.claudeProjectsDir, data.codexDir]
+      [data.tasksDir, data.claudeProjectsDir, data.codexDir, data.grokDir]
         .filter(Boolean)
         .join(" | ") ||
       "Not detected";
@@ -576,7 +582,7 @@ function connectSSE() {
   state.eventSource.addEventListener("init", (e) => {
     const data = JSON.parse(e.data);
     els.tasksDir.textContent =
-      [data.tasksDir, data.claudeProjectsDir, data.codexDir]
+      [data.tasksDir, data.claudeProjectsDir, data.codexDir, data.grokDir]
         .filter(Boolean)
         .join(" | ") ||
       "Not detected";

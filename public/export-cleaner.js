@@ -42,6 +42,7 @@
       .map((line) => {
         try {
           const evt = JSON.parse(line);
+          removeEncryptedContent(evt);
           const payload = evt.payload;
           if (!payload) return JSON.stringify(evt);
 
