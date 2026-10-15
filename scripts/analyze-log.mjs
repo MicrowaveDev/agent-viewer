@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "fs";
+import { createGrokAcpAnalysis } from "./grok-acp-analysis.mjs";
 import path from "path";
 import readline from "readline";
 import { analyzeLog as analyzeMeasurementLog } from "./rank-context-waste.mjs";
@@ -17,7 +18,7 @@ const mode = args.includes("--workflow-waste")
 if (!filePath || args.includes("--help") || args.includes("-h")) {
   console.log(`Usage: yarn agent:analyze-log <rollout.jsonl> [--all|--workflow-waste]
 
-Streams a Codex/Claude JSONL log and prints compact analysis without emitting
+Streams a Codex/Claude/Grok ACP JSONL log and prints compact analysis without emitting
 large image/base64 payloads.`);
   process.exit(filePath ? 0 : 1);
 }
@@ -29,6 +30,7 @@ if (!fs.existsSync(absPath)) {
 }
 
 const stats = fs.statSync(absPath);
+const acp = createGrokAcpAnalysis();
 const summary = {
   lines: 0,
   badJson: 0,
@@ -124,6 +126,7 @@ function summarizeImageGeneration(evt, payload, lineBytes) {
 
 function collectEvent(evt, line, lineBytes) {
   summary.lines += 1;
+  if (acp.collect(evt, summary.lines)) return;
   addCount(summary.types, evt.type);
 
   const payload = evt.payload || evt.message || {};
@@ -228,6 +231,11 @@ for await (const line of rl) {
   }
 }
 
+const acpResult = acp.result();
+if (acpResult.records) {
+  console.log(JSON.stringify({ ...acpResult, parsing: { records: summary.lines, badJson: summary.badJson, nonAcpRecords: summary.lines - summary.badJson - acpResult.records } }, null, 2));
+  process.exit(0);
+}
 const measurement = await analyzeMeasurementLog(absPath);
 
 function topEntries(map, max = 12) {
