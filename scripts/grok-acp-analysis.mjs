@@ -18,11 +18,34 @@ function text(value) {
   if (value.Result) return text(value.Result);
   if (value.EditsApplied) return text(value.EditsApplied.tool_output_for_prompt ?? value.EditsApplied.tool_output_for_prompt_concise);
   if (value.FileContent) return text(value.FileContent.content ?? value.FileContent.content_concise ?? value.FileContent.raw_output);
+  if (value.output_for_prompt !== undefined) return text(value.output_for_prompt);
   if (value.stdout !== undefined || value.stderr !== undefined) return [text(value.stdout), text(value.stderr)].filter(Boolean).join('\n');
   if (value.text !== undefined) return text(value.text);
   if (value.content !== undefined) return text(value.content);
   if (value.output !== undefined) return text(value.output);
   return '';
+}
+
+// Inspect result envelopes only. A document, command, or stdout containing a
+// quoted error is not evidence that this invocation failed.
+function failureMetadata(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const result = raw.Result && typeof raw.Result === 'object' ? raw.Result : raw;
+  const integer = value => Number.isInteger(value) ? value : null;
+  let exitCode = integer(result.exit_code ?? result.exitCode);
+  // Older Bash exports omit exit_code but retain the generated status header.
+  if (exitCode === null && /^(bash|terminal|shell)$/i.test(result.type || '')) {
+    const match = text(result.output_for_prompt).match(/^exit: (-?\d+)(?:\r?\n|$)/);
+    if (match) exitCode = Number(match[1]);
+  }
+  const response = result.response && typeof result.response === 'object' ? result.response : {};
+  const httpStatus = integer(result.http_status ?? result.httpStatus ?? result.status_code ?? result.statusCode ?? response.status);
+  return {
+    exitCode,
+    shell: (exitCode !== null && exitCode !== 0) || result.timed_out === true || Boolean(result.signal),
+    httpStatus: httpStatus >= 400 && httpStatus <= 599 ? httpStatus : null,
+    tool: result.isError === true || result.is_error === true || (result.error !== undefined && result.error !== null && result.error !== false && result.error !== ''),
+  };
 }
 
 export function createGrokAcpAnalysis() {
@@ -60,6 +83,12 @@ export function createGrokAcpAnalysis() {
           call.outputUnmeasured = !output && (u.rawOutput !== undefined || (u.content?.length > 0));
           call.outputBytes = bytes(output);
           call.outputDigest = digestText(output);
+          // ACP can refresh display content without resending raw metadata.
+          // Only an explicit newer raw result replaces the known outcome.
+          if (u.rawOutput !== undefined) {
+            call.failure = failureMetadata(u.rawOutput);
+            call.failureLine = line;
+          }
         }
         calls.set(key, call);
       }
@@ -92,10 +121,22 @@ export function createGrokAcpAnalysis() {
       const byTool = new Map(), byTarget = new Map(), statuses = {};
       let inputBytes = 0, outputBytes = 0, failed = 0, declaredCalls = 0, unmeasuredOutputCalls = 0;
       const largest = [];
+      const failures = { unique: 0, transport: 0, shell: 0, http: 0, tool: 0, examples: [] };
       for (const call of calls.values()) {
         const input = call.inputBytes, output = call.outputBytes;
         inputBytes += input; outputBytes += output;
         if (call.status === 'failed') failed++;
+        const failure = call.failure || {};
+        const kinds = [];
+        if (call.status === 'failed') kinds.push('transport');
+        if (failure.shell) kinds.push('shell');
+        if (failure.httpStatus !== null && failure.httpStatus !== undefined) kinds.push('http');
+        if (failure.tool) kinds.push('tool');
+        if (kinds.length) {
+          failures.unique++;
+          for (const kind of kinds) failures[kind]++;
+          if (failures.examples.length < 20) failures.examples.push({ line: call.failureLine || call.line, tool: safe(call.name), status: safe(call.status), kinds, exitCode: failure.exitCode ?? null, httpStatus: failure.httpStatus ?? null });
+        }
         if (call.outputUnmeasured) unmeasuredOutputCalls++;
         if (call.declared) declaredCalls++;
         statuses[call.status] = (statuses[call.status] || 0) + 1;
@@ -110,7 +151,7 @@ export function createGrokAcpAnalysis() {
       const rank = map => [...map.values()].sort((a, b) => b.outputBytes - a.outputBytes || a.name.localeCompare(b.name)).slice(0, 20);
       return {
         format: 'grok-acp', records, duplicateEvents,
-        tools: { unique: calls.size, statuses, declared: declaredCalls, updateOnly: calls.size - declaredCalls, anonymous: anonymousCalls, failed, unmeasuredOutputCalls, inputBytes, outputBytes, byTool: rank(byTool), byTarget: rank(byTarget), inputByTool: [...byTool.values()].sort((a, b) => b.inputBytes - a.inputBytes || a.name.localeCompare(b.name)).slice(0, 20), largestInputs: [...largest].sort((a, b) => b.inputBytes - a.inputBytes || a.line - b.line).slice(0, 20), largest: largest.sort((a, b) => b.outputBytes - a.outputBytes || a.line - b.line).slice(0, 20) },
+        tools: { unique: calls.size, statuses, declared: declaredCalls, updateOnly: calls.size - declaredCalls, anonymous: anonymousCalls, failed, failures, unmeasuredOutputCalls, inputBytes, outputBytes, byTool: rank(byTool), byTarget: rank(byTarget), inputByTool: [...byTool.values()].sort((a, b) => b.inputBytes - a.inputBytes || a.name.localeCompare(b.name)).slice(0, 20), largestInputs: [...largest].sort((a, b) => b.inputBytes - a.inputBytes || a.line - b.line).slice(0, 20), largest: largest.sort((a, b) => b.outputBytes - a.outputBytes || a.line - b.line).slice(0, 20) },
         usage: { turns: turns.size, records: turnRecords, turnsWithUsage: withUsage, complete: turns.size > 0 && withUsage === turns.size && fields.every(key => coverage[key] === turns.size), totals, fieldCoverage: coverage },
         compactions: { count: compactions.size, examples: [...compactions.values()].slice(0, 20) },
         diagnoses: [...errors].sort(),

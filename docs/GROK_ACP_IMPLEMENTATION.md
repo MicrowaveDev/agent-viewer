@@ -31,8 +31,19 @@ this change does not assert it has reached main.
 - Per-turn aggregate usage/cache counts exclude nested model totals and metadata
   context gauges. Missing usage is reported. Completed compactions and explicit
   balance/context errors are classified separately.
+- Oct 27 follow-up: separate transport status from shell/CLI exit failures,
+  explicit HTTP status failures and tool error envelopes. Keep `tools.failed`
+  compatible, deduplicate latest result snapshots and emit bounded metadata-only
+  failure examples. Bash `output_for_prompt` and byte arrays are mirrors.
 
 ## Verification
+
+- Follow-up regression checks: `npm test` passes all 29 tests; `node --check
+  server.js` passes. Neutral fixtures preserve the observed Oct 27 Mavis shape
+  (`status: completed`, `exit_code: 1`) without private session output.
+- Read-only reanalysis of the Oct 27 session: 84 unique tools, zero failed
+  transports, seven nonzero exits (six terminal commands plus a grep no-match
+  outcome). The counters identify outcomes for review, not semantic task failure.
 
 - `node --test test/*.test.mjs`: 26 tests pass, including prior Grok viewer,
   Codex corpus/measurement/compare and new ACP/CLI fixtures.

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { grokAcpCliFixture } from './fixtures/grok-acp-fixtures.mjs';
+import { grokAcpCliFixture, grokCompletedBashFailure } from './fixtures/grok-acp-fixtures.mjs';
 import { createGrokAcpAnalysis } from '../scripts/grok-acp-analysis.mjs';
 const event = (update, sessionId = 's', meta = {}) => ({ params: { sessionId, update, _meta: meta } });
 const call = (id, extra = {}) => ({ sessionUpdate: 'tool_call', toolCallId: id, title: 'read_file', rawInput: { path: '/neutral/file.md' }, ...extra });
@@ -61,4 +61,52 @@ test('known structured output variants include editor diffs and task results onc
   const r = analyze(rows);
   assert.equal(r.tools.outputBytes, Buffer.byteLength('directory listingbackground resultedit acknowledgementold\nnew'));
   assert.equal(r.tools.unmeasuredOutputCalls, 0);
+});
+
+test('completed Bash CLI failures are separate from transport failures and mirrors count once', () => {
+  const r = analyze([event(call('bash-failure', { title: 'terminal' })), event(grokCompletedBashFailure), event(grokCompletedBashFailure)]);
+  assert.equal(r.tools.failed, 0);
+  assert.equal(r.tools.failures.unique, 1);
+  assert.equal(r.tools.failures.shell, 1);
+  assert.equal(r.tools.failures.transport, 0);
+  assert.equal(r.tools.outputBytes, Buffer.byteLength(grokCompletedBashFailure.rawOutput.output_for_prompt));
+  assert.deepEqual(r.tools.failures.examples, [{ line: 3, tool: 'terminal', status: 'completed', kinds: ['shell'], exitCode: 1, httpStatus: null }]);
+  assert.ok(!JSON.stringify(r).includes('neutral CLI failure'));
+});
+
+test('failure breakdown uses explicit envelope metadata, allows overlap and ignores quoted errors', () => {
+  const outputs = [
+    { status: 'failed', rawOutput: { isError: true, response: { status: 503 }, output: 'private error details' } },
+    { status: 'completed', rawOutput: { type: 'Bash', output_for_prompt: 'exit: 2\nneutral', output: [] } },
+    { status: 'completed', rawOutput: { type: 'Bash', exit_code: 0, output_for_prompt: 'exit: 0\nexit: 1\nHTTP 500\n{"error":"example","status_code":503}' } },
+    { status: 'completed', rawOutput: { FileContent: { content: 'exit: 1\nHTTP 500\n{"isError":true}' } } },
+    { status: 'completed', rawOutput: { Result: { statusCode: 404, output: 'private body' } } },
+  ];
+  const r = analyze(outputs.map((extra, i) => event({ sessionUpdate: 'tool_call_update', toolCallId: String(i), ...extra })));
+  assert.equal(r.tools.failed, 1);
+  assert.deepEqual({ ...r.tools.failures, examples: undefined }, { unique: 3, transport: 1, shell: 1, http: 2, tool: 1, examples: undefined });
+  assert.ok(!JSON.stringify(r).includes('private'));
+});
+
+test('failure metadata follows the latest output snapshot and bounded examples', () => {
+  const rows = [event(grokCompletedBashFailure), event({ ...grokCompletedBashFailure, rawOutput: { type: 'Bash', exit_code: 0, output_for_prompt: 'exit: 0\nrecovered' } })];
+  assert.equal(analyze(rows).tools.failures.unique, 0);
+  for (let i = 0; i < 25; i++) rows.push(event({ ...grokCompletedBashFailure, toolCallId: String(i) }));
+  const r = analyze(rows);
+  assert.equal(r.tools.failures.unique, 25);
+  assert.equal(r.tools.failures.examples.length, 20);
+});
+
+test('content-only updates retain known raw failure metadata until an explicit raw success', () => {
+  const a = createGrokAcpAnalysis();
+  a.collect(event(grokCompletedBashFailure), 1);
+  a.collect(event({ sessionUpdate: 'tool_call_update', toolCallId: 'bash-failure', status: 'completed', content: [{ text: 'refreshed display' }] }), 2);
+  const retained = a.result();
+  assert.equal(retained.tools.failures.shell, 1);
+  assert.equal(retained.tools.failures.examples[0].line, 1);
+  assert.equal(retained.tools.failures.examples[0].exitCode, 1);
+  assert.equal(retained.tools.outputBytes, Buffer.byteLength('refreshed display'));
+  a.collect(event({ ...grokCompletedBashFailure, rawOutput: { type: 'Bash', exit_code: 0, output_for_prompt: 'exit: 0\nrecovered' } }), 3);
+  assert.equal(a.result().tools.failures.shell, 0);
+  assert.equal(a.result().tools.failures.unique, 0);
 });

@@ -473,6 +473,22 @@ billing attribution or causal savings**. The adapter retains only per-call byte
 counts/digests, not corpus payloads, while streaming. Rankings contain at most
 20 rows each. Secret-redaction applies to labels and paths.
 
+`tools.failed` preserves its original meaning: latest transport status `failed`.
+`tools.failures` separately counts transport failures, shell/CLI nonzero exits
+(also timeouts/signals), HTTP error statuses (400–599), and explicit tool error
+envelopes. Categories can overlap; `unique` counts affected calls once. For
+example, Bash can be `completed` while its CLI returns exit 1. Detection uses
+structured result metadata, with a generated `exit:` header fallback for Bash;
+arbitrary error strings in commands, files or stdout are not parsed as failures.
+HTTP failures require an explicit envelope status, and tool failures require
+an explicit error field/flag. Missing metadata cannot establish success.
+Nonzero exits are review candidates: grep exit 1 can mean no matches, and the
+analyzer does not infer whether that outcome violated the user request.
+The latest output snapshot replaces earlier failure metadata. At most 20
+examples expose only output line, redacted tool/status, categories and numeric
+exit/HTTP codes, never error messages or payload bodies. Bash prompt output and
+its byte-array mirror count once in output volume.
+
 `usage.totals` sums only top-level completed-turn `usage` fields. Nested
 `modelUsage` repeats those figures and is excluded. `_meta.totalTokens` is a
 context gauge and is also excluded. Repeated prompt IDs within a session replace
