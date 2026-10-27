@@ -38,7 +38,7 @@ this change does not assert it has reached main.
 
 ## Verification
 
-- Follow-up regression checks: `npm test` passes all 29 tests; `node --check
+- Follow-up regression checks: `npm test` passes all 30 tests; `node --check
   server.js` passes. Neutral fixtures preserve the observed Oct 27 Mavis shape
   (`status: completed`, `exit_code: 1`) without private session output.
 - Read-only reanalysis of the Oct 27 session: 84 unique tools, zero failed

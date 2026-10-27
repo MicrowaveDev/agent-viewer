@@ -484,7 +484,8 @@ HTTP failures require an explicit envelope status, and tool failures require
 an explicit error field/flag. Missing metadata cannot establish success.
 Nonzero exits are review candidates: grep exit 1 can mean no matches, and the
 analyzer does not infer whether that outcome violated the user request.
-The latest output snapshot replaces earlier failure metadata. At most 20
+The latest raw result replaces earlier failure metadata; content-only updates
+preserve that execution evidence and its original line. At most 20
 examples expose only output line, redacted tool/status, categories and numeric
 exit/HTTP codes, never error messages or payload bodies. Bash prompt output and
 its byte-array mirror count once in output volume.
