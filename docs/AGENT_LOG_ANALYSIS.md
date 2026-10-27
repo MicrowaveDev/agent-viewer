@@ -446,3 +446,59 @@ A good analysis does all of the following:
 - distinguishes instruction fixes from code/helper fixes
 - avoids bloated quoting and unnecessary log replay
 - gives maintainers a short path to implement the improvements
+
+## Grok ACP analysis
+
+The same single-log command accepts cleaned Grok `updates.jsonl` exports:
+
+```bash
+yarn agent:analyze-log /absolute/grok-export.jsonl --workflow-waste > /tmp/grok-report.json
+```
+
+ACP input produces a bounded JSON report rather than the legacy Markdown shape.
+The `params.update.sessionUpdate` adapter keys tools by session and tool-call ID,
+merges status updates, and counts the latest input/output snapshot once. Update-only
+calls are retained and reported separately. Known raw text variants (including
+UTF-8 stdout byte arrays) take precedence over short display summaries; editor
+diff blocks count once instead of adding their raw-output mirrors. Images are
+excluded. `unmeasuredOutputCalls` explicitly identifies metadata-only or unsupported
+output representations; zero bytes must not be interpreted as zero cost.
+
+`tools.byTool`, `byTarget`, `inputByTool`, `largestInputs` and `largest` rank
+observed byte contributors. They expose bounded names/paths, line numbers,
+statuses and digests, never commands, prompts or output bodies. Target counts
+include all tool families associated with that target, not just file reads.
+Byte counts measure selected text representation volume, **not model tokens,
+billing attribution or causal savings**. The adapter retains only per-call byte
+counts/digests, not corpus payloads, while streaming. Rankings contain at most
+20 rows each. Secret-redaction applies to labels and paths.
+
+`tools.failed` preserves its original meaning: latest transport status `failed`.
+`tools.failures` separately counts transport failures, shell/CLI nonzero exits
+(also timeouts/signals), HTTP error statuses (400–599), and explicit tool error
+envelopes. Categories can overlap; `unique` counts affected calls once. For
+example, Bash can be `completed` while its CLI returns exit 1. Detection uses
+structured result metadata, with a generated `exit:` header fallback for Bash;
+arbitrary error strings in commands, files or stdout are not parsed as failures.
+HTTP failures require an explicit envelope status, and tool failures require
+an explicit error field/flag. Missing metadata cannot establish success.
+Nonzero exits are review candidates: grep exit 1 can mean no matches, and the
+analyzer does not infer whether that outcome violated the user request.
+The latest output snapshot replaces earlier failure metadata. At most 20
+examples expose only output line, redacted tool/status, categories and numeric
+exit/HTTP codes, never error messages or payload bodies. Bash prompt output and
+its byte-array mirror count once in output volume.
+
+`usage.totals` sums only top-level completed-turn `usage` fields. Nested
+`modelUsage` repeats those figures and is excluded. `_meta.totalTokens` is a
+context gauge and is also excluded. Repeated prompt IDs within a session replace
+the same turn aggregate; field coverage and missing usage are explicit. The
+report cannot recover missing model calls or unrecorded turns. Compaction
+before/after counts come from completed compaction events; explicit `402` plus
+`balance exhausted` lifecycle errors produce `usage_balance_exhausted`, not a
+context-window diagnosis. Text in ordinary tool payloads cannot trigger it.
+
+Parsing metadata reports malformed and non-ACP records. Mixed-format files use
+ACP analysis for ACP records only and report the non-ACP count; analyze separate
+source exports for format-specific rankings. The corpus scanner and comparison
+gates remain Codex-oriented; this adapter does not silently broaden their schema.

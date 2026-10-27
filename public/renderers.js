@@ -605,3 +605,38 @@ function renderCodexEventMsg(p, time, file) {
   // Skip: agent_message, agent_reasoning, token_count (duplicates/noise)
   return "";
 }
+
+// Grok ACP updates and raw chat-history fallback. Exports retain the raw events.
+function renderGrokEvent(evt) {
+  const text = globalThis.AgentViewerGrok.text;
+  const update = evt.params?.update;
+  const kind = update?.sessionUpdate || evt.type;
+  const time = formatTimestamp(evt.timestamp);
+  let label = kind || 'Grok';
+  let body = '';
+  if (['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk'].includes(kind)) {
+    label = { user_message_chunk: 'User', agent_message_chunk: 'Assistant', agent_thought_chunk: 'Reasoning' }[kind];
+    body = renderTextBlock(text(update.content));
+  } else if (kind === 'tool_call') {
+    label = 'Tool';
+    body = renderToolBlock(update._meta?.['x.ai/tool']?.name || update.title || 'Tool',
+      update.toolCallId, escapeHtml(JSON.stringify(update.rawInput || {}, null, 2)));
+  } else if (kind === 'tool_call_update') {
+    label = 'Tool update';
+    const output = text(update.content) || text(update.rawOutput);
+    body = output ? (['completed', 'failed'].includes(update.status)
+      ? renderToolResult(`${update.toolCallId} ${update.status}`, output, update.status === 'failed')
+      : renderToolBlock(update.title || 'Tool progress', update.toolCallId, escapeHtml(output))) : '';
+  } else if (['user', 'assistant', 'system'].includes(kind)) {
+    label = kind;
+    body = renderTextBlock(text(evt.content));
+    for (const call of evt.tool_calls || []) {
+      body += renderToolBlock(call.name, call.id, escapeHtml(text(call.arguments)));
+    }
+  } else if (kind === 'tool_result') {
+    body = renderToolResult(evt.tool_call_id, text(evt.content), evt.is_error);
+  } else if (kind === 'reasoning') {
+    body = renderTextBlock(text(evt.summary));
+  }
+  return `<div class="event event-grok" data-testid="grok-event"><div class="event-header"><span class="badge badge-tool">${escapeHtml(label)}</span><span class="event-time">${time}</span></div><div class="event-body">${body}</div>${renderJsonSpoiler(evt)}</div>`;
+}
