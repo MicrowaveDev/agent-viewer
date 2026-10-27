@@ -1,3 +1,5 @@
+import "./public/grok-format.js";
+
 export function normalizePromptPreview(text) {
   return String(text || "")
     .replace(/<ide_[^>]+>[\s\S]*?<\/ide_[^>]+>/g, " ")
@@ -28,6 +30,8 @@ function isInjectedUserContext(text) {
 }
 
 export function userPromptFromEvent(evt) {
+  const grokPrompt = globalThis.AgentViewerGrok.prompt(evt);
+  if (grokPrompt) return grokPrompt;
   const payload = evt.payload;
 
   if (evt.type === "event_msg" && payload?.type === "user_message") {

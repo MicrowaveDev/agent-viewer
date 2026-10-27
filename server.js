@@ -10,11 +10,13 @@ import {
   normalizePromptPreview,
   userPromptFromEvent,
 } from "./prompt-metadata.js";
+import "./public/grok-format.js";
+import { discoverGrokSessions, grokSessionsDir } from "./grok-sessions.js";
 
 const { cleanForCopy } = globalThis.AgentViewerExportCleaner;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = 60653;
+const PORT = Number(process.env.PORT || 60653);
 const metadataCacheDir = path.join(__dirname, ".cache");
 const metadataCachePath = path.join(metadataCacheDir, "files-metadata.json");
 const tempDir = path.join(__dirname, "temp");
@@ -447,11 +449,19 @@ function getCodexFileList(sessionsDir) {
   return files.sort((a, b) => b.modified - a.modified);
 }
 
+function getGrokFileList() {
+  return discoverGrokSessions(grokDir).flatMap(session => {
+    try { return [buildFileMetadata({ ...session, stats: fs.statSync(session.filePath) })]; }
+    catch { return []; }
+  });
+}
+
 function getAllFiles() {
   const claudeFiles = getFileList(tasksDir);
   const claudeProjectFiles = getClaudeProjectFileList(claudeProjectsDir);
   const codexFiles = getCodexFileList(codexDir);
-  const all = [...claudeFiles, ...claudeProjectFiles, ...codexFiles].sort(
+  const grokFiles = getGrokFileList();
+  const all = [...claudeFiles, ...claudeProjectFiles, ...codexFiles, ...grokFiles].sort(
     (a, b) => b.modified - a.modified,
   );
   filePathMap.clear();
@@ -704,6 +714,7 @@ app.use(express.static(path.join(__dirname, "public")));
 let tasksDir = findClaudeTasksDir();
 let claudeProjectsDir = getClaudeProjectsDir();
 let codexDir = findCodexSessionsDir();
+let grokDir = grokSessionsDir();
 loadMetadataCache();
 
 // REST: list files
@@ -713,6 +724,7 @@ app.get("/api/files", (req, res) => {
     tasksDir,
     claudeProjectsDir,
     codexDir,
+    grokDir,
     files: files.map(toClientFile),
   });
 });
@@ -812,11 +824,13 @@ app.post("/api/refresh", (req, res) => {
   tasksDir = findClaudeTasksDir();
   claudeProjectsDir = getClaudeProjectsDir();
   codexDir = findCodexSessionsDir();
+  grokDir = grokSessionsDir();
   const files = getAllFiles();
   res.json({
     tasksDir,
     claudeProjectsDir,
     codexDir,
+    grokDir,
     files: files.map(toClientFile),
   });
 });
@@ -832,12 +846,13 @@ app.get("/api/events", (req, res) => {
   });
   res.flushHeaders();
 
-  // Send initial file list (both sources)
+  // Send the initial file list for all sources
   const files = getAllFiles();
   sendSSE(res, "init", {
     tasksDir,
     claudeProjectsDir,
     codexDir,
+    grokDir,
     files: files.map(toClientFile),
   });
 
@@ -877,6 +892,7 @@ function startWatcher() {
           tasksDir,
           claudeProjectsDir,
           codexDir,
+          grokDir,
           files: getAllFiles().map(toClientFile),
         });
       }
@@ -1085,6 +1101,52 @@ function startCodexWatcher() {
   console.log(`Watching Codex: ${codexDir}`);
 }
 
+// Watch the Grok home so sessions created after startup are detected too.
+function startGrokWatcher() {
+  const watcher = watch(path.dirname(grokDir), {
+    ignoreInitial: true,
+    ignored: candidate => {
+      const relative = path.relative(path.dirname(grokDir), candidate);
+      return relative !== '' && relative !== 'sessions' && !relative.startsWith(`sessions${path.sep}`);
+    },
+    awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+  });
+  watcher.on('all', (event, filePath) => {
+    if (!['add', 'change', 'unlink'].includes(event)) return;
+    if (!['updates.jsonl', 'chat_history.jsonl', 'summary.json'].includes(path.basename(filePath))) return;
+    const previous = new Map([...fileMetaMap].filter(([, meta]) => meta.source === 'grok'));
+    const current = getGrokFileList();
+    const ids = new Set(current.map(meta => meta.id));
+    for (const [id, old] of previous) {
+      if (ids.has(id)) continue;
+      filePathMap.delete(id);
+      fileMetaMap.delete(id);
+      fileOffsets.delete(old.filePath);
+      removeMetadataCacheEntry(old.filePath);
+      broadcastSSE('file-removed', { id });
+    }
+    for (const metadata of current) {
+      const old = previous.get(metadata.id);
+      filePathMap.set(metadata.id, metadata.filePath);
+      fileMetaMap.set(metadata.id, metadata);
+      if (!old) {
+        setFileOffsetIfUnknown(metadata.filePath, metadata.size);
+        broadcastSSE('file-added', metadata);
+      } else if (old.filePath !== metadata.filePath) {
+        fileOffsets.delete(old.filePath);
+        setFileOffsetIfUnknown(metadata.filePath, metadata.size);
+        broadcastSSE('file-update', buildLiveUpdatePayload(metadata, { content: '', skipped: true, reset: true }));
+      } else if (metadata.filePath === filePath) {
+        const update = readNewContent(filePath);
+        if (update) broadcastSSE('file-update', buildLiveUpdatePayload(metadata, update));
+      } else if (old.displayLabel !== metadata.displayLabel) {
+        broadcastSSE('file-update', metadata);
+      }
+    }
+    saveMetadataCache();
+  });
+}
+
 // SPA fallback: serve index.html for any non-API route (e.g. /:id)
 app.get("/:id", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -1100,4 +1162,5 @@ const server = app.listen(PORT, () => {
   startWatcher();
   startClaudeProjectsWatcher();
   startCodexWatcher();
+  startGrokWatcher();
 });

@@ -45,3 +45,11 @@ test("keeps ordinary user messages that contain markup", () => {
 
   assert.equal(prompt, "Please fix the <button>Save</button> caption.");
 });
+
+test("keeps Grok ACP and history captions after extracting the shared parser", () => {
+  const acp = {params: {update: {sessionUpdate: "user_message_chunk",
+    content: {type: "text", text: "Inspect the generation set."}}}};
+  assert.equal(userPromptFromEvent(acp), "Inspect the generation set.");
+  assert.equal(userPromptFromEvent({type: "user", content: [{type: "text", text: "Review saved presets."}]}), "Review saved presets.");
+  assert.equal(userPromptFromEvent({type: "user", synthetic_reason: "system", content: "Injected metadata"}), "");
+});
