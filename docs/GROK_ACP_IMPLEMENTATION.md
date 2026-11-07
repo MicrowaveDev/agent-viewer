@@ -38,6 +38,14 @@ this change does not assert it has reached main.
 
 ## Verification
 
+- Nov 7 follow-up (#11): bounded nested HTTP metadata and structured failed-CLI
+  JSON errors retain shell/HTTP evidence once per call. Native zero-match grep
+  is separately counted without hiding stderr, timeout or signal failures.
+  `npm test`:37 passed; `node --check server.js`:passed. Read-only reanalysis of
+  the107-record recovery session now finds one failed invocation (shell exit1
+  and HTTP403), zero transport failures and one expected no-match grep. Previous
+  detector output was shell2/HTTP0. No private error messages, request keys,
+  commands or bodies are emitted by the analyzer.
 - Follow-up regression checks: `npm test` passes all 29 tests; `node --check
   server.js` passes. Neutral fixtures preserve the observed Oct 27 Mavis shape
   (`status: completed`, `exit_code: 1`) without private session output.

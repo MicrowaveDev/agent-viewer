@@ -110,3 +110,46 @@ test('content-only updates retain known raw failure metadata until an explicit r
   assert.equal(a.result().tools.failures.shell, 0);
   assert.equal(a.result().tools.failures.unique, 0);
 });
+
+test('failed CLI nested HTTP errors retain shell evidence and count once without exposing error bodies', () => {
+  const error = { code: 'comic_geometry_recovery_unconfirmed', message: 'PRIVATE_FAILURE_BODY', requestPath: '/private/request.json', cause: { code: 'comic_api_rejected', httpStatus: 403, errorCode: 'generation_studio_key_scope_forbidden' } };
+  const output = `exit: 1\nidempotency-key=PRIVATE_KEY\n${JSON.stringify(error)}`;
+  const update = { sessionUpdate: 'tool_call_update', toolCallId: 'recover', status: 'completed', rawOutput: { type: 'Bash', exit_code: 1, output_for_prompt: output, output: [...Buffer.from(output)] } };
+  const r = analyze([event(call('recover', { title: 'terminal' })), event(update), event(update)]);
+  assert.equal(r.tools.unique, 1); assert.equal(r.tools.failures.unique, 1);
+  assert.equal(r.tools.failures.shell, 1); assert.equal(r.tools.failures.http, 1); assert.equal(r.tools.failures.transport, 0);
+  assert.equal(r.tools.failures.examples[0].httpStatus, 403); assert.deepEqual(r.tools.failures.examples[0].kinds, ['shell', 'http']);
+  assert.equal(r.tools.outputBytes, Buffer.byteLength(output));
+  assert.ok(!JSON.stringify(r).includes('PRIVATE_')); assert.ok(!JSON.stringify(r).includes('request.json'));
+});
+
+test('nested statuses support explicit envelopes and failed stderr but ignore successful stdout and documents', () => {
+  const error = JSON.stringify({ code: 'http_request_failed', message: 'private response', cause: { details: { response: { status: 503 } } } });
+  const outputs = [
+    { Result: { error: { cause: { http_status: 404 } } } },
+    { exitCode: 1, stderr: error },
+    { exit_code: 1, stderr: 'unrelated warning', stdout: [...Buffer.from(error)] },
+    { type: 'Bash', exit_code: 0, output_for_prompt: `exit: 0\n${error}` },
+    { FileContent: { content: error } },
+    { type: 'Bash', exit_code: 1, output_for_prompt: `exit: 1\n${JSON.stringify({ message: 'not a CLI error envelope', cause: { httpStatus: 500 } })}` },
+  ];
+  const r = analyze(outputs.map((rawOutput, i) => event({ sessionUpdate: 'tool_call_update', toolCallId: String(i), status: 'completed', rawOutput })));
+  assert.equal(r.tools.failures.http, 3); assert.equal(r.tools.failures.shell, 3); assert.equal(r.tools.failures.unique, 4);
+  assert.deepEqual(r.tools.failures.examples.map(e => e.httpStatus), [404, 503, 503, null]);
+  assert.ok(!JSON.stringify(r).includes('private response'));
+});
+
+test('native no-match grep is expected while errors and timeouts retain failure evidence', () => {
+  const noMatch = { type: 'GrepSearch', exit_code: 1, match_count: 0, stdout: [...Buffer.from('<workspace_result>No matches</workspace_result>')], stderr: [], file_matches: [] };
+  const outputs = [noMatch, { ...noMatch, stderr: [...Buffer.from('unreadable file')] }, { ...noMatch, timed_out: true }];
+  const r = analyze(outputs.map((rawOutput, i) => event({ sessionUpdate: 'tool_call_update', toolCallId: String(i), status: 'completed', rawOutput })));
+  assert.equal(r.tools.noMatchCalls, 1); assert.equal(r.tools.failures.unique, 2); assert.equal(r.tools.failures.shell, 2);
+  assert.equal(r.tools.failures.http, 0); assert.equal(r.tools.failures.transport, 0);
+});
+
+test('failed CLI JSON scanning is bounded by output bytes and record count', () => {
+  const error = JSON.stringify({ code: 'request_failed', message: 'too far', cause: { httpStatus: 403 } });
+  const outputs = ['x'.repeat(256 * 1024) + error, Array(101).fill('preamble').join('\n') + '\n' + error];
+  const r = analyze(outputs.map((output_for_prompt, i) => event({ sessionUpdate: 'tool_call_update', toolCallId: String(i), status: 'completed', rawOutput: { type: 'Bash', exit_code: 1, output_for_prompt } })));
+  assert.equal(r.tools.failures.shell, 2); assert.equal(r.tools.failures.http, 0);
+});

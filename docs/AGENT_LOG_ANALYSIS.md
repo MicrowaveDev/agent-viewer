@@ -480,10 +480,16 @@ envelopes. Categories can overlap; `unique` counts affected calls once. For
 example, Bash can be `completed` while its CLI returns exit 1. Detection uses
 structured result metadata, with a generated `exit:` header fallback for Bash;
 arbitrary error strings in commands, files or stdout are not parsed as failures.
-HTTP failures require an explicit envelope status, and tool failures require
-an explicit error field/flag. Missing metadata cannot establish success.
-Nonzero exits are review candidates: grep exit 1 can mean no matches, and the
-analyzer does not infer whether that outcome violated the user request.
+HTTP failures accept explicit statuses in bounded `cause`/`error`/`details`/
+`response` metadata chains. Failed shell invocations also inspect complete JSON
+CLI error records (`code` and `message`) in stderr or selected output streams;
+the scan is bounded to 256 KiB, 100 lines per stream and six nested metadata
+levels. Successful stdout, source reads and arbitrary quoted errors are ignored.
+Tool failures require an explicit error field/flag. Missing metadata cannot
+establish success. Native `GrepSearch` exit 1 with zero matches, an empty match
+list and no stderr/error/timeout/signal counts under `tools.noMatchCalls`, not
+as a failed invocation. Other nonzero exits remain review candidates; the
+analyzer does not infer task failure from an ordinary shell grep exit alone.
 The latest output snapshot replaces earlier failure metadata. At most 20
 examples expose only output line, redacted tool/status, categories and numeric
 exit/HTTP codes, never error messages or payload bodies. Bash prompt output and
