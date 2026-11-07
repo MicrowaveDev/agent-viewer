@@ -26,8 +26,47 @@ function text(value) {
   return '';
 }
 
-// Inspect result envelopes only. A document, command, or stdout containing a
-// quoted error is not evidence that this invocation failed.
+// Only follow structured error metadata, never arbitrary content/document trees.
+function nestedHttpStatus(root) {
+  const pending = [{ value: root, depth: 0 }], seen = new Set();
+  for (let scanned = 0; pending.length && scanned < 32; scanned++) {
+    const { value, depth } = pending.shift();
+    if (!value || typeof value !== 'object' || Array.isArray(value) || seen.has(value)) continue;
+    seen.add(value);
+    const status = value.http_status ?? value.httpStatus ?? value.status_code ?? value.statusCode ?? value.status;
+    if (Number.isInteger(status) && status >= 400 && status <= 599) return status;
+    if (depth < 6) for (const key of ['cause', 'error', 'details', 'response']) {
+      if (value[key] && typeof value[key] === 'object') pending.push({ value: value[key], depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+// Failed CLIs may print a single JSON error after a shell status header or a
+// short stdout preamble. Parse complete error records only, with strict bounds.
+// Successful stdout and quoted JSON in source/file reads never enter this path.
+function failedCliHttpStatus(result) {
+  let budget = 256 * 1024;
+  const outputs = new Set([result.stderr, result.output_for_prompt, result.output, result.stdout].map(text));
+  for (const output of outputs) {
+    if (!output || bytes(output) > budget) continue;
+    budget -= bytes(output);
+    for (const line of output.split(/\r?\n/).slice(0, 100)) {
+      if (!line.startsWith('{') || !line.endsWith('}')) continue;
+      let error;
+      try { error = JSON.parse(line); } catch { continue; }
+      if (!error || typeof error !== 'object' || Array.isArray(error)
+        || typeof error.code !== 'string' || !/^[a-z][a-z0-9_]{0,99}$/.test(error.code)
+        || typeof error.message !== 'string') continue;
+      const status = nestedHttpStatus(error);
+      if (status !== null) return status;
+    }
+  }
+  return null;
+}
+
+// Inspect result envelopes first. A document, command or successful stdout
+// containing a quoted error is not evidence that this invocation failed.
 function failureMetadata(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const result = raw.Result && typeof raw.Result === 'object' ? raw.Result : raw;
@@ -38,12 +77,17 @@ function failureMetadata(raw) {
     const match = text(result.output_for_prompt).match(/^exit: (-?\d+)(?:\r?\n|$)/);
     if (match) exitCode = Number(match[1]);
   }
-  const response = result.response && typeof result.response === 'object' ? result.response : {};
-  const httpStatus = integer(result.http_status ?? result.httpStatus ?? result.status_code ?? result.statusCode ?? response.status);
+  const noMatch = result.type === 'GrepSearch' && exitCode === 1 && result.match_count === 0
+    && Array.isArray(result.file_matches) && result.file_matches.length === 0
+    && !text(result.stderr) && !result.error
+    && !result.timed_out && !result.signal && !result.isError && !result.is_error;
+  const shell = !noMatch && ((exitCode !== null && exitCode !== 0) || result.timed_out === true || Boolean(result.signal));
+  const httpStatus = nestedHttpStatus(result) ?? (shell ? failedCliHttpStatus(result) : null);
   return {
     exitCode,
-    shell: (exitCode !== null && exitCode !== 0) || result.timed_out === true || Boolean(result.signal),
-    httpStatus: httpStatus >= 400 && httpStatus <= 599 ? httpStatus : null,
+    shell,
+    noMatch,
+    httpStatus,
     tool: result.isError === true || result.is_error === true || (result.error !== undefined && result.error !== null && result.error !== false && result.error !== ''),
   };
 }
@@ -119,7 +163,7 @@ export function createGrokAcpAnalysis() {
         for (const key of fields) if (Number.isFinite(usage[key]) && usage[key] >= 0) { totals[key] += usage[key]; coverage[key]++; }
       }
       const byTool = new Map(), byTarget = new Map(), statuses = {};
-      let inputBytes = 0, outputBytes = 0, failed = 0, declaredCalls = 0, unmeasuredOutputCalls = 0;
+      let inputBytes = 0, outputBytes = 0, failed = 0, declaredCalls = 0, unmeasuredOutputCalls = 0, noMatchCalls = 0;
       const largest = [];
       const failures = { unique: 0, transport: 0, shell: 0, http: 0, tool: 0, examples: [] };
       for (const call of calls.values()) {
@@ -127,6 +171,7 @@ export function createGrokAcpAnalysis() {
         inputBytes += input; outputBytes += output;
         if (call.status === 'failed') failed++;
         const failure = call.failure || {};
+        if (failure.noMatch) noMatchCalls++;
         const kinds = [];
         if (call.status === 'failed') kinds.push('transport');
         if (failure.shell) kinds.push('shell');
@@ -151,7 +196,7 @@ export function createGrokAcpAnalysis() {
       const rank = map => [...map.values()].sort((a, b) => b.outputBytes - a.outputBytes || a.name.localeCompare(b.name)).slice(0, 20);
       return {
         format: 'grok-acp', records, duplicateEvents,
-        tools: { unique: calls.size, statuses, declared: declaredCalls, updateOnly: calls.size - declaredCalls, anonymous: anonymousCalls, failed, failures, unmeasuredOutputCalls, inputBytes, outputBytes, byTool: rank(byTool), byTarget: rank(byTarget), inputByTool: [...byTool.values()].sort((a, b) => b.inputBytes - a.inputBytes || a.name.localeCompare(b.name)).slice(0, 20), largestInputs: [...largest].sort((a, b) => b.inputBytes - a.inputBytes || a.line - b.line).slice(0, 20), largest: largest.sort((a, b) => b.outputBytes - a.outputBytes || a.line - b.line).slice(0, 20) },
+        tools: { unique: calls.size, statuses, declared: declaredCalls, updateOnly: calls.size - declaredCalls, anonymous: anonymousCalls, failed, failures, noMatchCalls, unmeasuredOutputCalls, inputBytes, outputBytes, byTool: rank(byTool), byTarget: rank(byTarget), inputByTool: [...byTool.values()].sort((a, b) => b.inputBytes - a.inputBytes || a.name.localeCompare(b.name)).slice(0, 20), largestInputs: [...largest].sort((a, b) => b.inputBytes - a.inputBytes || a.line - b.line).slice(0, 20), largest: largest.sort((a, b) => b.outputBytes - a.outputBytes || a.line - b.line).slice(0, 20) },
         usage: { turns: turns.size, records: turnRecords, turnsWithUsage: withUsage, complete: turns.size > 0 && withUsage === turns.size && fields.every(key => coverage[key] === turns.size), totals, fieldCoverage: coverage },
         compactions: { count: compactions.size, examples: [...compactions.values()].slice(0, 20) },
         diagnoses: [...errors].sort(),
